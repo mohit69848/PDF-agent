@@ -11,7 +11,7 @@ tqdm
 regex
 numpy
 nest_asyncio
-
+langchain-community
 python-multipart
 
 
