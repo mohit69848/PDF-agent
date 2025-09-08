@@ -8,7 +8,7 @@ langchain-google-genai>=0.0.5
 streamlit>=1.22.0
 tqdm>=4.64.0
 # NLP / text utilities
-regex==2023.10.23
+regex==2023.10.3
 numpy>=1.23.0
 
 python-multipart>=0.0.5
