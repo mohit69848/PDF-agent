@@ -31,7 +31,7 @@ def load_pdf(path: str) -> List[Document]:
 
     # Use RecursiveCharacterTextSplitter to split long pages into manageable chunks
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
+        chunk_size=2000,
         chunk_overlap=150,
         separators=["\n\n", "\n", ".", " "]
     )
