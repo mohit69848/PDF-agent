@@ -2,7 +2,7 @@ import asyncio
 import nest_asyncio
 import streamlit as st
 import tempfile
-import re
+
 from agent import PDFQAAgent
 
 # Setup asyncio for Streamlit

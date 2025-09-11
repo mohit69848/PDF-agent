@@ -3,7 +3,9 @@ import os
 # Load environment variables from .env file
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH","./chroma_db")
+# CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH","./chroma_db")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:password@localhost:5432/pdfqa_db")
+
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "google")
 LLM_MODEL = os.getenv("LLM_MODEL","gemini-2.5-flash")
 

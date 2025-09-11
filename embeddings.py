@@ -10,13 +10,10 @@ def get_embedding():
             raise EnvironmentError(
                 "GOOGLE_API_KEY is missing. Set it in your .env file."
             )
-        # Use your Google embedding model
-        return GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        return GoogleGenerativeAIEmbeddings(
+            model="models/embedding-001",
+            google_api_key=GOOGLE_API_KEY
+        )
     
-    # Optional fallback for HuggingFace or OpenAI
-    # elif EMBEDDING_PROVIDER.lower() == "huggingface":
-    #     from langchain.embeddings import HuggingFaceEmbeddings
-    #     return HuggingFaceEmbeddings()
-
     else:
         raise ValueError(f"Unsupported embedding provider: {EMBEDDING_PROVIDER}")

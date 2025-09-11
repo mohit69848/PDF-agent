@@ -2,8 +2,7 @@ python-dotenv
 langchain
 langgraph
 pypdf
-chromadb
-faiss-cpu
+
 langchain-google-genai
 streamlit
 tqdm
@@ -20,3 +19,7 @@ PyMuPDF
 unstructured
 pdf2image
 pytesseract
+
+psycopg2-binary
+langchain[pgvector]
+pgvector

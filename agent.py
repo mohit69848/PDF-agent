@@ -11,14 +11,16 @@ import re
 
 class PDFQAAgent:
     def __init__(self, persist_dir: str = None):
-        self.vector_store = VectorStore(persist_dir)
+        self.vector_store = VectorStore()
         self.qa_chain = None
 
     def ingest(self, pdf_path: str, progress_callback: Callable = None) -> int:
         docs: List[Document] = load_pdf(pdf_path)
         if not docs:
             raise ValueError("No valid content found in PDF to ingest.")
+         # Build vector store in PostgreSQL
         self.vector_store.build(docs, source_file=pdf_path, progress_callback=progress_callback)
+        # Build retriever and QA chain
         retriever = self.vector_store.vectordb.as_retriever(
             search_type="similarity_score_threshold",
             search_kwargs={"k": 8, "score_threshold": 0.3},
@@ -36,6 +38,7 @@ class PDFQAAgent:
         )
         candidates = retriever.get_relevant_documents(question)
 
+ # Remove duplicates
         seen = set()
         unique_candidates = []
         for d in candidates:
@@ -44,6 +47,7 @@ class PDFQAAgent:
                 seen.add(key)
                 unique_candidates.append(d)
 
+         # Try exact match first
         exact_answer = None
         question_lower = question.lower()
         for doc in unique_candidates:
@@ -57,7 +61,7 @@ class PDFQAAgent:
             exact_answer = "\n\n".join([f"[Page {d.metadata.get('page_number','N/A')}] {d.page_content}" for d in reranked_docs])
         else:
             reranked_docs = unique_candidates
-
+# Generate final summary with LLM
         if not reranked_docs:
             summary = exact_answer
         else:

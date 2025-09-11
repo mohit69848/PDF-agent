@@ -1,7 +1,7 @@
-from langchain_community.vectorstores import Chroma
+from langchain.vectorstores import PGVector
 from langchain.docstore.document import Document
 from embeddings import get_embedding
-from config import CHROMA_DB_PATH
+from config import DATABASE_URL
 from typing import List, Callable
 import os
 
@@ -15,8 +15,10 @@ def sanitize_metadata(meta: dict) -> dict:
     return clean_meta
 
 class VectorStore:
-    def __init__(self, persist_dir: str = CHROMA_DB_PATH):
-        self.persist_dir = persist_dir
+    def __init__(self, persist_dir: str = None):
+        """
+        For PGVector, persist_dir is not used.
+        """
         self.vectordb = None
 
     def build(self, docs: List[Document], source_file: str = None, progress_callback: Callable = None):
@@ -39,17 +41,20 @@ class VectorStore:
         if not enriched_docs:
             raise ValueError("All documents were filtered out. Nothing to ingest!")
 
-        self.vectordb = Chroma.from_documents(
+        # Use PGVector
+        self.vectordb = PGVector.from_documents(
             documents=enriched_docs,
             embedding=get_embedding(),
-            persist_directory=self.persist_dir,
+            collection_name="pdf_docs",
+            connection_string=DATABASE_URL,
+            drop_existing=True  # optional, to overwrite previous data
         )
-        self.vectordb.persist()
 
     def search(self, query: str, top_k: int = 5) -> List[Document]:
         if not self.vectordb:
-            self.vectordb = Chroma(
-                persist_directory=self.persist_dir,
+            self.vectordb = PGVector(
                 embedding_function=get_embedding(),
+                collection_name="pdf_docs",
+                connection_string=DATABASE_URL
             )
         return self.vectordb.similarity_search(query, k=top_k)
