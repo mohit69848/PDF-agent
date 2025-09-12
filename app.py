@@ -4,7 +4,9 @@ import streamlit as st
 import os
 from agent import PDFQAAgent
 
+# -----------------------------
 # Setup asyncio
+# -----------------------------
 try:
     asyncio.get_running_loop()
 except RuntimeError:
@@ -12,14 +14,15 @@ except RuntimeError:
     asyncio.set_event_loop(loop)
 nest_asyncio.apply()
 
+# -----------------------------
+# Streamlit page config
+# -----------------------------
 st.set_page_config(page_title="PDF QA", page_icon="✅", layout="centered")
 st.title("📄 PDF Question-Answering Agent")
 
-# Create a folder for uploaded PDFs
-PDF_FOLDER = "pdfs"
-os.makedirs(PDF_FOLDER, exist_ok=True)
-
-# Session state
+# -----------------------------
+# Session state initialization
+# -----------------------------
 if "history" not in st.session_state:
     st.session_state.history = []
 if "agent" not in st.session_state:
@@ -29,13 +32,22 @@ if "pdf_path" not in st.session_state:
 
 agent = st.session_state.agent
 
-# PDF upload
+# -----------------------------
+# Ensure upload folder exists
+# -----------------------------
+PDF_FOLDER = "uploaded_pdfs"
+os.makedirs(PDF_FOLDER, exist_ok=True)
+
+# -----------------------------
+# PDF Upload
+# -----------------------------
 uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
 if uploaded:
-    # Save the PDF in the persistent folder
+    # Save uploaded PDF to a persistent folder
     pdf_path = os.path.join(PDF_FOLDER, uploaded.name)
     with open(pdf_path, "wb") as f:
-        f.write(uploaded.read())
+        f.write(uploaded.getbuffer())  # Important for deployment
+
     st.session_state.pdf_path = pdf_path
 
     st.info("📥 Processing PDF... this may take some time")
@@ -55,7 +67,9 @@ if uploaded:
         st.error(f"⚠️ Failed to ingest PDF: {str(e)}")
         st.session_state.pdf_path = None
 
+# -----------------------------
 # Ask question
+# -----------------------------
 question = st.text_input("Ask a question about the PDF:")
 
 if st.button("Get Answer") and question:
@@ -79,7 +93,9 @@ if st.button("Get Answer") and question:
                 "sources": sources
             })
 
+# -----------------------------
 # Display chat history
+# -----------------------------
 if st.session_state.history:
     st.subheader("💬 Chat History")
     for chat in reversed(st.session_state.history):
