@@ -2,39 +2,50 @@ from langchain_community.document_loaders import PyMuPDFLoader, UnstructuredPDFL
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.docstore.document import Document
 from typing import List
-
+import os
 
 def load_pdf(path: str) -> List[Document]:
     """
-    Load a PDF, fallback to OCR if text extraction fails or content is too small.
-    Splits the text into chunks and adds metadata including page numbers.
+    Load a PDF and split it into chunks. Automatically switches to OCR if needed.
+    Adjusts chunk size based on PDF size to avoid memory issues.
     """
+    file_size_mb = os.path.getsize(path) / (1024 * 1024)  # file size in MB
+
+    # Adaptive chunk size and overlap
+    if file_size_mb <= 5:
+        chunk_size, chunk_overlap = 1000, 150
+    elif file_size_mb <= 20:
+        chunk_size, chunk_overlap = 800, 100
+    elif file_size_mb <= 50:
+        chunk_size, chunk_overlap = 600, 80
+    else:  # Very large PDFs
+        chunk_size, chunk_overlap = 400, 50
+
+    # Try normal PDF loader first
     try:
-        # Try loading with PyMuPDFLoader first
         loader = PyMuPDFLoader(path)
         pages = loader.load()
         total_text = "".join([p.page_content for p in pages]).strip()
         if len(total_text) < 50:
             raise ValueError("Too little text, switching to OCR")
     except Exception:
-        # Fallback to OCR with UnstructuredPDFLoader
         loader = UnstructuredPDFLoader(path, strategy="ocr_only")
         pages = loader.load()
 
+    # Clean pages
     cleaned_docs = []
     for i, page in enumerate(pages):
         text = page.page_content.strip()
         meta = dict(page.metadata)
-        meta["page_number"] = i + 1  # Ensure page number is present
-        if len(text) > 30:  # Only keep pages with significant content
+        meta["page_number"] = i + 1
+        if len(text) > 30:
             cleaned_docs.append(Document(page_content=text, metadata=meta))
 
-    # Use RecursiveCharacterTextSplitter to split long pages into manageable chunks
+    # Split into chunks
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=5000,
-        chunk_overlap=100,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
         separators=["\n\n", "\n", ".", " "]
     )
 
-    # Split documents and return
     return splitter.split_documents(cleaned_docs)

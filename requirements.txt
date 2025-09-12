@@ -23,3 +23,5 @@ pytesseract
 psycopg2-binary
 langchain[pgvector]
 pgvector
+sentence-transformers
+sqlalchemy
