@@ -41,14 +41,18 @@ os.makedirs(PDF_FOLDER, exist_ok=True)
 # -----------------------------
 # PDF Upload
 # -----------------------------
+# PDF upload
 uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
 if uploaded:
-    # Save uploaded PDF to a persistent folder
-    pdf_path = os.path.join(PDF_FOLDER, uploaded.name)
-    with open(pdf_path, "wb") as f:
-        f.write(uploaded.getbuffer())  # Important for deployment
+    # Save the uploaded file to a real path (works on Streamlit Cloud)
+    pdf_folder = "uploaded_pdfs"
+    os.makedirs(pdf_folder, exist_ok=True)
+    pdf_path = os.path.join(pdf_folder, uploaded.name)
 
-    st.session_state.pdf_path = pdf_path
+    with open(pdf_path, "wb") as f:
+        f.write(uploaded.getbuffer())  # important for deployment
+
+    st.session_state.pdf_path = pdf_path  # now a real string path
 
     st.info("📥 Processing PDF... this may take some time")
     progress_bar = st.progress(0)
@@ -66,7 +70,6 @@ if uploaded:
     except Exception as e:
         st.error(f"⚠️ Failed to ingest PDF: {str(e)}")
         st.session_state.pdf_path = None
-
 # -----------------------------
 # Ask question
 # -----------------------------
