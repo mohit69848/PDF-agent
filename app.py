@@ -16,29 +16,38 @@ nest_asyncio.apply()
 st.set_page_config(page_title="PDF QA", page_icon="✅", layout="centered")
 st.title("📄 PDF Question-Answering Agent")
 
+# --------------------------
 # Session state
+# --------------------------
 if "history" not in st.session_state:
     st.session_state.history = []
+
 if "agent" not in st.session_state:
     st.session_state.agent = PDFQAAgent()
+
 if "pdf_path" not in st.session_state:
     st.session_state.pdf_path = None
 
 agent = st.session_state.agent
 
-# Upload PDF
+# --------------------------
+# PDF upload
+# --------------------------
 uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
 if uploaded:
+    # Create folder to save uploaded PDFs
     pdf_folder = "uploaded_pdfs"
     os.makedirs(pdf_folder, exist_ok=True)
     pdf_path = os.path.join(pdf_folder, uploaded.name)
 
+    # Save uploaded file to persistent path
     with open(pdf_path, "wb") as f:
         f.write(uploaded.getbuffer())
 
     st.session_state.pdf_path = pdf_path
     st.info("📥 Processing PDF... this may take some time")
 
+    # Progress bar
     progress_bar = st.progress(0)
     status_text = st.empty()
 
@@ -55,7 +64,9 @@ if uploaded:
         st.error(f"⚠️ Failed to ingest PDF: {e}")
         st.session_state.pdf_path = None
 
+# --------------------------
 # Ask question
+# --------------------------
 question = st.text_input("Ask a question about the PDF:")
 
 if st.button("Get Answer") and question:
@@ -78,9 +89,12 @@ if st.button("Get Answer") and question:
                     snippet = d.page_content[:300].replace("\n", " ")
                     st.markdown(f"- Page {page_num}: `{snippet}...`")
 
+            # Save to history
             st.session_state.history.append({"question": question, "answer": res['answer']})
 
-# Show history
+# --------------------------
+# Show chat history
+# --------------------------
 if st.session_state.history:
     st.subheader("💬 Chat History")
     for chat in reversed(st.session_state.history):
