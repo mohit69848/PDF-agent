@@ -5,23 +5,18 @@ from typing import List
 import os
 
 def load_pdf(path: str) -> List[Document]:
-    """
-    Load a PDF and split it into chunks. Automatically switches to OCR if needed.
-    Adjusts chunk size based on PDF size to avoid memory issues.
-    """
-    file_size_mb = os.path.getsize(path) / (1024 * 1024)  # file size in MB
+    file_size_mb = os.path.getsize(path) / (1024 * 1024)
 
-    # Adaptive chunk size and overlap
+    # Adaptive chunk size
     if file_size_mb <= 5:
         chunk_size, chunk_overlap = 1000, 150
     elif file_size_mb <= 20:
         chunk_size, chunk_overlap = 800, 100
     elif file_size_mb <= 50:
         chunk_size, chunk_overlap = 600, 80
-    else:  # Very large PDFs
+    else:
         chunk_size, chunk_overlap = 400, 50
 
-    # Try normal PDF loader first
     try:
         loader = PyMuPDFLoader(path)
         pages = loader.load()
@@ -32,7 +27,6 @@ def load_pdf(path: str) -> List[Document]:
         loader = UnstructuredPDFLoader(path, strategy="ocr_only")
         pages = loader.load()
 
-    # Clean pages
     cleaned_docs = []
     for i, page in enumerate(pages):
         text = page.page_content.strip()
@@ -41,11 +35,9 @@ def load_pdf(path: str) -> List[Document]:
         if len(text) > 30:
             cleaned_docs.append(Document(page_content=text, metadata=meta))
 
-    # Split into chunks
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         separators=["\n\n", "\n", ".", " "]
     )
-
     return splitter.split_documents(cleaned_docs)
