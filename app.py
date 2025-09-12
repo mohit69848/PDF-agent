@@ -3,8 +3,9 @@ import nest_asyncio
 import streamlit as st
 import tempfile
 from agent import PDFQAAgent
+import os
 
-# Setup asyncio
+# -------------------- Setup asyncio --------------------
 try:
     asyncio.get_running_loop()
 except RuntimeError:
@@ -12,10 +13,11 @@ except RuntimeError:
     asyncio.set_event_loop(loop)
 nest_asyncio.apply()
 
+# -------------------- Streamlit Page --------------------
 st.set_page_config(page_title="PDF QA", page_icon="✅", layout="centered")
 st.title("📄 PDF Question-Answering Agent")
 
-# Session state
+# -------------------- Session State --------------------
 if "history" not in st.session_state:
     st.session_state.history = []
 if "agent" not in st.session_state:
@@ -25,31 +27,38 @@ if "pdf_path" not in st.session_state:
 
 agent = st.session_state.agent
 
-# PDF upload
+# -------------------- PDF Upload --------------------
 uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
 if uploaded:
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-        tmp.write(uploaded.read())
-        st.session_state.pdf_path = tmp.name
-
-    st.info("📥 Processing PDF... this may take some time")
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    def update_progress(current, total):
-        progress = int((current / total) * 100)
-        progress_bar.progress(progress)
-        status_text.text(f"Processing chunk {current} of {total}...")
-
     try:
-        count = agent.ingest(st.session_state.pdf_path, progress_callback=update_progress)
-        progress_bar.progress(100)
-        status_text.text(f"✅ Ingested {count} chunks from PDF!")
+        # Save uploaded PDF to a temporary file
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(uploaded.getbuffer())  # ✅ safer than read()
+            st.session_state.pdf_path = tmp.name
+
+        st.info("📥 Processing PDF... this may take some time")
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        def update_progress(current, total):
+            progress = int((current / total) * 100)
+            progress_bar.progress(progress)
+            status_text.text(f"Processing chunk {current} of {total}...")
+
+        # -------------------- Ingest PDF --------------------
+        if st.session_state.pdf_path and os.path.exists(st.session_state.pdf_path):
+            count = agent.ingest(st.session_state.pdf_path, progress_callback=update_progress)
+            progress_bar.progress(100)
+            status_text.text(f"✅ Ingested {count} chunks from PDF!")
+        else:
+            st.error("⚠️ PDF path invalid or file missing!")
+            st.session_state.pdf_path = None
+
     except Exception as e:
         st.error(f"⚠️ Failed to ingest PDF: {str(e)}")
         st.session_state.pdf_path = None
 
-# Ask question
+# -------------------- Ask Question --------------------
 question = st.text_input("Ask a question about the PDF:")
 
 if st.button("Get Answer") and question:
@@ -64,7 +73,7 @@ if st.button("Get Answer") and question:
                 res = None
 
         if res:
-            answer = res.get("answer", "⚠️ No summary available.")
+            answer = res.get("answer", "⚠️ No answer available.")
             sources = res.get("sources", [])
 
             st.session_state.history.append({
@@ -73,7 +82,7 @@ if st.button("Get Answer") and question:
                 "sources": sources
             })
 
-# Display chat history
+# -------------------- Display Chat History --------------------
 if st.session_state.history:
     st.subheader("💬 Chat History")
     for chat in reversed(st.session_state.history):
