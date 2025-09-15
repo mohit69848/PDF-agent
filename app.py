@@ -14,6 +14,9 @@ except RuntimeError:
     asyncio.set_event_loop(loop)
 nest_asyncio.apply()
 
+# databse on app connection
+DATABASE_URL = st.secrets["DATABASE"]["URL"]
+
 # -----------------------------
 # Streamlit page config
 # -----------------------------
