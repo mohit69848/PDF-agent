@@ -14,8 +14,9 @@ except RuntimeError:
     asyncio.set_event_loop(loop)
 nest_asyncio.apply()
 
-# databse on app connection
-# DATABASE_URL = st.secrets["DATABASE"]["URL"]
+# -----------------------------
+# Get database URL
+# -----------------------------
 try:
     DATABASE_URL = st.secrets["DATABASE"]["URL"]
 except Exception:
@@ -24,13 +25,13 @@ except Exception:
 print("Using database at:", DATABASE_URL)
 
 # -----------------------------
-# Streamlit page config
+# Streamlit config
 # -----------------------------
 st.set_page_config(page_title="PDF QA", page_icon="✅", layout="centered")
 st.title("📄 PDF Question-Answering Agent")
 
 # -----------------------------
-# Session state initialization
+# Initialize session state
 # -----------------------------
 if "history" not in st.session_state:
     st.session_state.history = []
@@ -50,20 +51,14 @@ os.makedirs(PDF_FOLDER, exist_ok=True)
 # -----------------------------
 # PDF Upload
 # -----------------------------
-# PDF upload
 uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
-if uploaded:
-    # Save the uploaded file to a real path (works on Streamlit Cloud)
-    pdf_folder = "uploaded_pdfs"
-    os.makedirs(pdf_folder, exist_ok=True)
-    pdf_path = os.path.join(pdf_folder, uploaded.name)
-
+if uploaded is not None:
+    pdf_path = os.path.join(PDF_FOLDER, uploaded.name)
     with open(pdf_path, "wb") as f:
-        f.write(uploaded.getbuffer())  # important for deployment
-
-    st.session_state.pdf_path = pdf_path  # now a real string path
-
+        f.write(uploaded.getbuffer())
+    st.session_state.pdf_path = pdf_path
     st.info("📥 Processing PDF... this may take some time")
+
     progress_bar = st.progress(0)
     status_text = st.empty()
 
@@ -73,12 +68,14 @@ if uploaded:
         status_text.text(f"Processing chunk {current} of {total}...")
 
     try:
+        st.write("PDF path before ingest:", st.session_state.pdf_path)
         count = agent.ingest(st.session_state.pdf_path, progress_callback=update_progress)
         progress_bar.progress(100)
         status_text.text(f"✅ Ingested {count} chunks from PDF!")
     except Exception as e:
         st.error(f"⚠️ Failed to ingest PDF: {str(e)}")
         st.session_state.pdf_path = None
+
 # -----------------------------
 # Ask question
 # -----------------------------
@@ -90,6 +87,7 @@ if st.button("Get Answer") and question:
     else:
         with st.spinner("🤔 Generating answer..."):
             try:
+                st.write("PDF path before answer:", st.session_state.pdf_path)
                 res = agent.answer(question, top_k=10)
             except Exception as e:
                 st.error(f"⚠️ Failed to generate answer: {str(e)}")

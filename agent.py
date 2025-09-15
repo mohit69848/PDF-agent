@@ -1,4 +1,3 @@
-# agent.py
 from loader import load_pdf
 from vector_store import VectorStore
 from retriever import build_qa_chain
