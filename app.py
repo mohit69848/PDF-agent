@@ -15,7 +15,13 @@ except RuntimeError:
 nest_asyncio.apply()
 
 # databse on app connection
-DATABASE_URL = st.secrets["DATABASE"]["URL"]
+# DATABASE_URL = st.secrets["DATABASE"]["URL"]
+try:
+    DATABASE_URL = st.secrets["DATABASE"]["URL"]
+except Exception:
+    DATABASE_URL = os.getenv("DATABASE_URL")
+
+print("Using database at:", DATABASE_URL)
 
 # -----------------------------
 # Streamlit page config
