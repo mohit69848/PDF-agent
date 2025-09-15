@@ -5,6 +5,7 @@ from embeddings import get_embedding
 from config import DATABASE_URL
 from typing import List, Callable
 from sqlalchemy import create_engine, text
+import streamlit as st
 import os
 
 embedding_model = get_embedding()
@@ -21,7 +22,20 @@ def sanitize_metadata(meta: dict) -> dict:
 
 class VectorStore:
     def __init__(self):
-        self.vectordb = None
+        self.database_url = os.getenv("DATABASE_URL") or st.secrets["DATABASE"]["URL"]
+        st.write("VectorStore database URL:", self.database_url)
+        try:
+            self.engine = create_engine(self.database_url)
+            # Try to connect to confirm it works
+            with self.engine.connect() as conn:
+                result = conn.execute("SELECT 1")
+                st.write("Database connection successful!", result.scalar())
+        except Exception as e:
+            st.error(f"Database connection failed: {e}")
+            self.engine = None
+        
+        
+        # self.vectordb = None
 
     def build(self, docs: List[Document], source_file: str = None, progress_callback: Callable = None):
         """Build vector store with PGVector. Drops old table if dimension mismatch."""
