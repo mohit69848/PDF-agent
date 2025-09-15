@@ -8,6 +8,8 @@ from sqlalchemy import create_engine, text
 import streamlit as st
 import os
 
+DATABASE_URL = os.getenv("DATABASE_URL") or st.secrets["DATABASE"]["URL"]
+
 embedding_model = get_embedding()
 
 def sanitize_metadata(meta: dict) -> dict:
@@ -22,7 +24,7 @@ def sanitize_metadata(meta: dict) -> dict:
 
 class VectorStore:
     def __init__(self):
-        self.database_url = os.getenv("DATABASE_URL") or st.secrets["DATABASE"]["URL"]
+        self.database_url = DATABASE_URL
         st.write("VectorStore database URL:", self.database_url)
         try:
             self.engine = create_engine(self.database_url)
