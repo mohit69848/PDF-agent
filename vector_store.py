@@ -21,6 +21,8 @@ def sanitize_metadata(meta: dict) -> dict:
             clean_meta[k] = str(v)
     return clean_meta
 
+# Read DATABASE_URL from env or Streamlit secrets
+DATABASE_URL = os.getenv("DATABASE_URL") or st.secrets["DATABASE"]["URL"]
 class VectorStore:
     def __init__(self):
         self.database_url = DATABASE_URL
