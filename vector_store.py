@@ -28,7 +28,7 @@ class VectorStore:
             self.engine = create_engine(self.database_url)
             # Try to connect to confirm it works
             with self.engine.connect() as conn:
-                result = conn.execute("SELECT 1")
+                result = conn.execute(text("SELECT 1"))  # wrap with text()
                 st.write("Database connection successful!", result.scalar())
         except Exception as e:
             st.error(f"Database connection failed: {e}")
