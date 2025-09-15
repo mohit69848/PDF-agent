@@ -8,7 +8,6 @@ from sqlalchemy import create_engine, text
 import streamlit as st
 import os
 
-DATABASE_URL = os.getenv("DATABASE_URL") or st.secrets["DATABASE"]["URL"]
 
 embedding_model = get_embedding()
 
