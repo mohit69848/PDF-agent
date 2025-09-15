@@ -1,5 +1,7 @@
 import os
 import streamlit as st
+from dotenv import load_dotenv
+load_dotenv()
 
 # Detect if running in Streamlit cloud environment
 IS_STREAMLIT = "STREAMLIT_SERVER_RUN_ID" in os.environ
