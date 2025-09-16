@@ -17,12 +17,12 @@ nest_asyncio.apply()
 # -----------------------------
 # Get database URL
 # -----------------------------
-try:
-    DATABASE_URL = st.secrets["DATABASE"]["URL"]
-except Exception:
-    DATABASE_URL = os.getenv("DATABASE_URL")
+# try:
+#     DATABASE_URL = st.secrets["DATABASE"]["URL"]
+# except Exception:
+#     DATABASE_URL = os.getenv("DATABASE_URL")
 
-print("Using database at:", DATABASE_URL)
+# print("Using database at:", DATABASE_URL)
 
 # -----------------------------
 # Streamlit config
