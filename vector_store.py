@@ -27,13 +27,13 @@ DATABASE_URL = os.getenv("DATABASE_URL") or st.secrets["DATABASE"]["URL"]
 class VectorStore:
     def __init__(self):
         self.database_url = DATABASE_URL
-        st.write("VectorStore database URL:", self.database_url)
+        # st.write("VectorStore database URL:", self.database_url)
         try:
             self.engine = create_engine(self.database_url)
             # Try to connect to confirm it works
             with self.engine.connect() as conn:
                 result = conn.execute(text("SELECT 1"))  # wrap with text()
-                st.write("Database connection successful!", result.scalar())
+                # st.write("Database connection successful!", result.scalar())
         except Exception as e:
             st.error(f"Database connection failed: {e}")
             self.engine = None
@@ -48,7 +48,7 @@ class VectorStore:
 
         enriched_docs = []
         total_docs = len(docs)
-        for i, d in enumerate(docs):
+        for i, d in enumerate(docs):    
             meta = sanitize_metadata(d.metadata.copy())
             if source_file:
                 meta["file_name"] = os.path.basename(source_file)
