@@ -16,15 +16,19 @@ class PDFQAAgent:
         self.question_map: Dict[int, str] = {}
 
     def ingest(self, pdf_path: str, progress_callback: Callable = None) -> int:
+        # Load PDF
         docs: List[Document] = load_pdf(pdf_path)
         if not docs:
             raise ValueError("No valid content found in PDF to ingest.")
 
+        # Map numbered questions dynamically
         full_text = "\n".join([d.page_content for d in docs])
         self._map_questions(full_text)
 
+        # Build vector store
         self.vector_store.build(docs, source_file=pdf_path, progress_callback=progress_callback)
 
+        # Build retriever and QA chain
         retriever = self.vector_store.vectordb.as_retriever(
             search_type="similarity_score_threshold",
             search_kwargs={"k": 8, "score_threshold": 0.3},
@@ -34,6 +38,7 @@ class PDFQAAgent:
         return len(docs)
 
     def _map_questions(self, text: str):
+        """Dynamically map numbered questions in PDF"""
         pattern = re.compile(r'(\d+)[\.:]\s*(.+?)(?=(\n\d+[\.:])|\Z)', re.DOTALL)
         matches = pattern.findall(text)
         for match in matches:
@@ -41,14 +46,14 @@ class PDFQAAgent:
             q_text = match[1].strip().replace("\n", " ")
             self.question_map[q_num] = q_text
 
-    def find_relevant_section(self, documents: List[Document], question_text: str) -> Document | None:
+    def find_references_section(self, documents: List[Document]) -> Document | None:
         """
-        Dynamically finds a section in documents based on patterns:
-        - Fully capitalized lines
-        - Lines followed by citation-like content
-        - Lines near the end of the document
+        Dynamically detect references or bibliography sections.
+        Works by identifying:
+        - A heading-like line (all caps, long enough)
+        - Followed by numbered or citation-like lines
+        - Usually near the end of the document
         """
-        q_lower = question_text.lower()
         for doc in documents:
             lines = doc.page_content.splitlines()
             for i, line in enumerate(lines):
@@ -56,79 +61,71 @@ class PDFQAAgent:
                 # Skip empty lines
                 if not clean_line:
                     continue
-                # Check if line is fully capitalized and long enough to be a heading
+                # Consider only lines near the end
+                if i < len(lines) - 5:
+                    continue
+                # Detect heading: long and uppercase
                 is_heading = clean_line.isupper() and len(clean_line) > 4
-                # Check if nearby lines look like references or citations
-                next_lines = lines[i+1:i+4] if i+4 <= len(lines) else lines[i+1:]
-                looks_like_citation = any(
-                    re.match(r'^\s*[\d\-\*\.\)]', nl.strip()) or "http" in nl for nl in next_lines
-                )
-                is_end = i >= len(lines) - 5
-                if is_heading and (looks_like_citation or is_end):
+                # Check if following lines look like citations
+                next_lines = lines[i+1:i+10] if i+10 <= len(lines) else lines[i+1:]
+                has_citations = any(re.match(r'^\s*[\d\-\*\.\)]', nl.strip()) or "http" in nl for nl in next_lines)
+                if is_heading and has_citations:
                     return Document(page_content="\n".join(lines[i:]), metadata=doc.metadata)
         return None
 
     def answer(self, user_input: str, top_k: int = 5):
         question_text = user_input.strip()
-        q_lower = question_text.lower()
 
-        numeric_match = re.match(r'(\d+)\s*question', q_lower())
+        # Handle numeric question format like "5 question"
+        numeric_match = re.match(r'(\d+)\s*question', question_text.lower())
         if numeric_match:
             q_num = int(numeric_match.group(1))
             if q_num in self.question_map:
                 question_text = self.question_map[q_num]
-                q_lower = question_text.lower()
             else:
                 return {"answer": f"⚠️ Question {q_num} not found in PDF.", "sources": []}
 
         if not self.vector_store.vectordb:
             raise ValueError("Vector store is empty. Please ingest a PDF first.")
 
+        # Retrieve relevant documents
         retriever = self.vector_store.vectordb.as_retriever(
             search_type="mmr",
             search_kwargs={"k": top_k * 3},
         )
         candidates = retriever.get_relevant_documents(question_text)
 
-          # Step 1 – Try exact match in any document
-        for doc in candidates:
-            if q_lower in doc.page_content.lower():
-                return{
-                    "answer": doc.page_content.strip(),
-                    "sources" : [doc]
-                }
-            # Step 2 – Attempt to detect relevant section like references
+        # First, attempt to dynamically detect references section
+        references_doc = self.find_references_section(candidates)
+        if references_doc:
+            return {"answer": references_doc.page_content.strip(), "sources": [references_doc]}
 
-        relevant_doc = self.find_relevant_section(candidates, question_text)
-        if relevant_doc:
-            return{
-                "answer": relevant_doc.page_content.strip(),
-                "sources": [relevant_doc]
-            }
-        # Step 3 – If no exact match or section found, fallback to rerank and summarization
+        # Try exact match
+        for doc in candidates:
+            if question_text.lower() in doc.page_content.lower():
+                return {"answer": doc.page_content.strip(), "sources": [doc]}
+
+        # Fallback: rerank with LLM
         reranked_docs = rerank_with_llm(question_text, candidates, top_k=top_k)
         if not reranked_docs:
-            return{"answer": "⚠️ No relevant content found.", "sources": []}    
+            return {"answer": "⚠️ No relevant content found.", "sources": []}
+
         context = "\n\n".join([f"[Page {d.metadata.get('page_number','N/A')}] {d.page_content}" for d in reranked_docs])
         llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY)
-        prompt = f""" 
+
+        prompt = f"""
 You are an AI assistant. The user asked: "{question_text}"
 
 Relevant text chunks:
 {context}
 
 Instructions:
-1. Provide a concise structured summary only if necessary.
-2. Avoid repeating content.
-3. Clearly state if no exact match is found.
-4. Do not infer beyond provided content.
-"""    
+1. Summarize concisely and structure the answer.
+2. Use clear bullet points or sections.
+3. Avoid repeating information.
+4. Only include content from the provided text.
+"""
         result = llm.invoke([HumanMessage(content=prompt)])
         summary = result.content if result else "⚠️ No relevant content found."
 
-        return{
-            "answer" : summary,
-            "sources": reranked_docs
-        }
-
-       
+        return {"answer": summary, "sources": reranked_docs}
