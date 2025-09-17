@@ -13,7 +13,7 @@ class PDFQAAgent:
     def __init__(self):
         self.vector_store = VectorStore()
         self.qa_chain = None
-        self.question_map: Dict[int, str] = {}  # Maps question numbers to text
+        self.question_map: Dict[int, str] = {}
 
     def ingest(self, pdf_path: str, progress_callback: Callable = None) -> int:
         docs: List[Document] = load_pdf(pdf_path)
@@ -29,7 +29,7 @@ class PDFQAAgent:
             search_type="similarity_score_threshold",
             search_kwargs={"k": 8, "score_threshold": 0.3},
         )
-        self.qa_chain = build_qa_chain(retriever)  # Use it for structured QA if needed
+        self.qa_chain = build_qa_chain(retriever)
 
         return len(docs)
 
@@ -42,11 +42,30 @@ class PDFQAAgent:
             self.question_map[q_num] = q_text
 
     def find_relevant_section(self, documents: List[Document], question_text: str) -> Document | None:
+        """
+        Dynamically finds a section in documents based on patterns:
+        - Fully capitalized lines
+        - Lines followed by citation-like content
+        - Lines near the end of the document
+        """
         q_lower = question_text.lower()
         for doc in documents:
-            content_lower = doc.page_content.lower()
-            if q_lower in content_lower:
-                return doc
+            lines = doc.page_content.splitlines()
+            for i, line in enumerate(lines):
+                clean_line = line.strip()
+                # Skip empty lines
+                if not clean_line:
+                    continue
+                # Check if line is fully capitalized and long enough to be a heading
+                is_heading = clean_line.isupper() and len(clean_line) > 4
+                # Check if nearby lines look like references or citations
+                next_lines = lines[i+1:i+4] if i+4 <= len(lines) else lines[i+1:]
+                looks_like_citation = any(
+                    re.match(r'^\s*[\d\-\*\.\)]', nl.strip()) or "http" in nl for nl in next_lines
+                )
+                is_end = i >= len(lines) - 5
+                if is_heading and (looks_like_citation or is_end):
+                    return Document(page_content="\n".join(lines[i:]), metadata=doc.metadata)
         return None
 
     def answer(self, user_input: str, top_k: int = 5):
@@ -69,12 +88,25 @@ class PDFQAAgent:
         )
         candidates = retriever.get_relevant_documents(question_text)
 
-        # First, attempt exact match
-        exact_doc = self.find_relevant_section(candidates, question_text)
-        if exact_doc:
-            return {"answer": exact_doc.page_content.strip(), "sources": [exact_doc]}
+        # Attempt to dynamically detect relevant sections like references without hardcoding
+        relevant_doc = self.find_relevant_section(candidates, question_text)
+        if relevant_doc:
+            return {
+                "answer": relevant_doc.page_content.strip(),
+                "sources": [relevant_doc]
+            }
 
-        # If exact match not found, rerank with LLM
+        # Try exact match within the content
+        q_lower = question_text.lower()
+        for doc in candidates:
+            content_lower = doc.page_content.lower()
+            if q_lower in content_lower:
+                return {
+                    "answer": doc.page_content.strip(),
+                    "sources": [doc]
+                }
+
+        # If still not found, fallback to reranking with LLM
         reranked_docs = rerank_with_llm(question_text, candidates, top_k=top_k)
         if not reranked_docs:
             return {"answer": "⚠️ No relevant content found.", "sources": []}
@@ -98,7 +130,6 @@ Instructions:
 3. Avoid repeating information.
 4. Only include content from the provided text.
 """
-
         result = llm.invoke([HumanMessage(content=prompt)])
         summary = result.content if result else "⚠️ No relevant content found."
 
