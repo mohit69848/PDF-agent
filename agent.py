@@ -70,12 +70,14 @@ class PDFQAAgent:
 
     def answer(self, user_input: str, top_k: int = 5):
         question_text = user_input.strip()
+        q_lower = question_text.lower()
 
-        numeric_match = re.match(r'(\d+)\s*question', question_text.lower())
+        numeric_match = re.match(r'(\d+)\s*question', q_lower())
         if numeric_match:
             q_num = int(numeric_match.group(1))
             if q_num in self.question_map:
                 question_text = self.question_map[q_num]
+                q_lower = question_text.lower()
             else:
                 return {"answer": f"⚠️ Question {q_num} not found in PDF.", "sources": []}
 
@@ -88,52 +90,45 @@ class PDFQAAgent:
         )
         candidates = retriever.get_relevant_documents(question_text)
 
-        # Attempt to dynamically detect relevant sections like references without hardcoding
+          # Step 1 – Try exact match in any document
+        for doc in candidates:
+            if q_lower in doc.page_content.lower():
+                return{
+                    "answer": doc.page_content.strip(),
+                    "sources" : [doc]
+                }
+            # Step 2 – Attempt to detect relevant section like references
+
         relevant_doc = self.find_relevant_section(candidates, question_text)
         if relevant_doc:
-            return {
+            return{
                 "answer": relevant_doc.page_content.strip(),
                 "sources": [relevant_doc]
             }
-
-        # Try exact match within the content
-        q_lower = question_text.lower()
-        for doc in candidates:
-            content_lower = doc.page_content.lower()
-            if q_lower in content_lower:
-                return {
-                    "answer": doc.page_content.strip(),
-                    "sources": [doc]
-                }
-
-        # If still not found, fallback to reranking with LLM
+        # Step 3 – If no exact match or section found, fallback to rerank and summarization
         reranked_docs = rerank_with_llm(question_text, candidates, top_k=top_k)
         if not reranked_docs:
-            return {"answer": "⚠️ No relevant content found.", "sources": []}
-
+            return{"answer": "⚠️ No relevant content found.", "sources": []}    
         context = "\n\n".join([f"[Page {d.metadata.get('page_number','N/A')}] {d.page_content}" for d in reranked_docs])
         llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY)
-
-        prompt = f"""
+        prompt = f""" 
 You are an AI assistant. The user asked: "{question_text}"
 
 Relevant text chunks:
 {context}
 
 Instructions:
-1. Summarize concisely and structure the answer.
-2. Use clear bullet points or sections such as:
-   - Definition / Concept
-   - Advantages / Benefits
-   - Applications / Examples
-   - Notes / References
-3. Avoid repeating information.
-4. Only include content from the provided text.
-"""
+1. Provide a concise structured summary only if necessary.
+2. Avoid repeating content.
+3. Clearly state if no exact match is found.
+4. Do not infer beyond provided content.
+"""    
         result = llm.invoke([HumanMessage(content=prompt)])
         summary = result.content if result else "⚠️ No relevant content found."
 
-        return {
-            "answer": summary,
+        return{
+            "answer" : summary,
             "sources": reranked_docs
         }
+
+       
