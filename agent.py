@@ -16,7 +16,7 @@ class PDFQAAgent:
         self.question_map: Dict[int, str] = {}  # Maps question numbers to text
 
     def ingest(self, pdf_path: str, progress_callback: Callable = None) -> int:
-        # Load PDF using your loader
+        # Load PDF
         docs: List[Document] = load_pdf(pdf_path)
         if not docs:
             raise ValueError("No valid content found in PDF to ingest.")
@@ -49,7 +49,7 @@ class PDFQAAgent:
     def answer(self, user_input: str, top_k: int = 5):
         question_text = user_input.strip()
 
-        # Numeric question like "5 question"
+        # Check for numeric question format like "5 question"
         numeric_match = re.match(r'(\d+)\s*question', question_text.lower())
         if numeric_match:
             q_num = int(numeric_match.group(1))
@@ -94,10 +94,11 @@ class PDFQAAgent:
         else:
             reranked_docs = unique_candidates
 
-        # Summarize using LLM
+        # Summarize using LLM if documents are available
         if reranked_docs:
             context = "\n\n".join([f"[Page {d.metadata.get('page_number','N/A')}] {d.page_content}" for d in reranked_docs])
             llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY)
+
             prompt = f"""
 You are an AI assistant. The user asked: "{question_text}"
 
@@ -105,13 +106,18 @@ Relevant text chunks:
 {context}
 
 Instructions:
-- Summarize concisely
-- Use bullet points or sections
-- Only include content from the provided text
+1. Summarize concisely and structure the answer.
+2. Use clear bullet points or sections such as:
+   - Definition / Concept
+   - Advantages / Benefits
+   - Applications / Examples
+   - Notes / References
+3. Avoid repeating information.
+4. Only include content from the provided text.
 """
             result = llm.invoke([HumanMessage(content=prompt)])
             summary = result.content if result else exact_answer
         else:
-            summary = exact_answer
+            summary = exact_answer or "⚠️ No relevant content found."
 
         return {"answer": summary, "sources": reranked_docs}
