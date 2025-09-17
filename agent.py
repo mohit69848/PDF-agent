@@ -8,7 +8,6 @@ from reranker import rerank_with_llm
 from config import LLM_MODEL, GOOGLE_API_KEY
 from langchain_google_genai import ChatGoogleGenerativeAI
 import re
-import string
 
 class PDFQAAgent:
     def __init__(self):
@@ -17,6 +16,7 @@ class PDFQAAgent:
         self.question_map: Dict[int, str] = {}
 
     def ingest(self, pdf_path: str, progress_callback: Callable = None) -> int:
+        """Ingest PDF, split, map questions, and build vector store."""
         docs: List[Document] = load_pdf(pdf_path)
         if not docs:
             raise ValueError("No valid content found in PDF to ingest.")
@@ -35,6 +35,7 @@ class PDFQAAgent:
         return len(docs)
 
     def _map_questions(self, text: str):
+        """Map numbered questions in PDF dynamically by parsing text patterns."""
         pattern = re.compile(r'(\d+)[\.:]\s*(.+?)(?=(\n\d+[\.:])|\Z)', re.DOTALL)
         matches = pattern.findall(text)
         for match in matches:
@@ -42,77 +43,24 @@ class PDFQAAgent:
             q_text = match[1].strip().replace("\n", " ")
             self.question_map[q_num] = q_text
 
-    def find_references_section(self, documents: List[Document], user_query: str) -> Document | None:
+    def find_exact_section(self, documents: List[Document], query: str) -> Document | None:
         """
-        Dynamically detect references-like sections by analyzing document structure,
-        formatting patterns, and content relevance to the user's query.
+        Find the exact section that contains the query.
+        Looks for paragraphs or blocks containing the query text exactly.
         """
-        # Lowercase user query for relevance checking
-        query_terms = set(word.strip(string.punctuation).lower() for word in user_query.split())
-
-        # Score candidate sections based on heading format and query relevance
-        best_score = 0
-        best_doc = None
+        query_lower = query.strip().lower()
 
         for doc in documents:
-            lines = doc.page_content.splitlines()
-            # Focus only on the last 20% of pages
-            if not self._is_in_last_part(doc, documents):
-                continue
-
-            for i, line in enumerate(lines):
-                clean_line = line.strip()
-                if not clean_line:
-                    continue
-
-                # Heading detection: long, uppercase or capitalized line
-                heading_score = self._heading_score(clean_line)
-
-                # Look ahead for citations, numbered lists, or URLs
-                citation_score = self._citation_score(lines, i + 1)
-
-                # Check if the section content is relevant to user query
-                content_score = self._content_relevance_score(lines[i:], query_terms)
-
-                total_score = heading_score + citation_score + content_score
-
-                if total_score > best_score:
-                    best_score = total_score
-                    best_doc = Document(page_content="\n".join(lines[i:]), metadata=doc.metadata)
-
-        return best_doc if best_score > 1 else None
-
-    def _is_in_last_part(self, doc: Document, documents: List[Document]) -> bool:
-        idx = documents.index(doc)
-        return idx >= int(len(documents) * 0.8)
-
-    def _heading_score(self, line: str) -> float:
-        if len(line) < 5:
-            return 0
-        if line.isupper():
-            return 2
-        if line.istitle() and len(line.split()) > 1:
-            return 1
-        return 0
-
-    def _citation_score(self, lines: List[str], start_idx: int) -> float:
-        score = 0
-        for line in lines[:10]:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if re.match(r'^(\d+[\.\)]|\*|-)', stripped):
-                score += 1
-            if "http" in stripped or "www." in stripped:
-                score += 1
-        return min(score, 3)
-
-    def _content_relevance_score(self, lines: List[str], query_terms: set) -> float:
-        text = " ".join(lines).lower()
-        terms_found = sum(1 for term in query_terms if term in text)
-        return min(terms_found / max(len(query_terms), 1), 1)
+            text = doc.page_content
+            # Split into paragraphs by double newline or lines separated by punctuation
+            paragraphs = re.split(r'\n\s*\n', text)
+            for para in paragraphs:
+                if query_lower in para.lower():
+                    return Document(page_content=para.strip(), metadata=doc.metadata)
+        return None
 
     def answer(self, user_input: str, top_k: int = 5):
+        """Answer the question using exact match or fallback to LLM reranking."""
         question_text = user_input.strip()
 
         numeric_match = re.match(r'(\d+)\s*question', question_text.lower())
@@ -132,14 +80,12 @@ class PDFQAAgent:
         )
         candidates = retriever.get_relevant_documents(question_text)
 
-        references_doc = self.find_references_section(candidates, question_text)
-        if references_doc:
-            return {"answer": references_doc.page_content.strip(), "sources": [references_doc]}
+        # First attempt exact match section search
+        exact_doc = self.find_exact_section(candidates, question_text)
+        if exact_doc:
+            return {"answer": exact_doc.page_content.strip(), "sources": [exact_doc]}
 
-        for doc in candidates:
-            if question_text.lower() in doc.page_content.lower():
-                return {"answer": doc.page_content.strip(), "sources": [doc]}
-
+        # Fallback to LLM rerank if exact not found
         reranked_docs = rerank_with_llm(question_text, candidates, top_k=top_k)
         if not reranked_docs:
             return {"answer": "⚠️ No relevant content found.", "sources": []}
