@@ -17,19 +17,15 @@ class PDFQAAgent:
         self.question_map: Dict[int, str] = {}
 
     def ingest(self, pdf_path: str, progress_callback: Callable = None) -> int:
-        # Load PDF
         docs: List[Document] = load_pdf(pdf_path)
         if not docs:
             raise ValueError("No valid content found in PDF to ingest.")
 
-        # Map numbered questions dynamically
         full_text = "\n".join([d.page_content for d in docs])
         self._map_questions(full_text)
 
-        # Build vector store
         self.vector_store.build(docs, source_file=pdf_path, progress_callback=progress_callback)
 
-        # Build retriever and QA chain
         retriever = self.vector_store.vectordb.as_retriever(
             search_type="similarity_score_threshold",
             search_kwargs={"k": 8, "score_threshold": 0.3},
@@ -39,7 +35,6 @@ class PDFQAAgent:
         return len(docs)
 
     def _map_questions(self, text: str):
-        """Dynamically map numbered questions in PDF"""
         pattern = re.compile(r'(\d+)[\.:]\s*(.+?)(?=(\n\d+[\.:])|\Z)', re.DOTALL)
         matches = pattern.findall(text)
         for match in matches:
@@ -48,35 +43,44 @@ class PDFQAAgent:
             self.question_map[q_num] = q_text
 
     def similar(self, a: str, b: str) -> float:
-        """Compute similarity between two strings."""
         return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
-    def find_exact_section(self, documents: List[Document], query: str) -> Document | None:
-        """
-        Find the section that contains or closely matches the query.
-        Searches for exact and approximate matches in headings and paragraphs.
-        """
-        query_lower = query.strip().lower()
+    def find_section_by_pattern(self, documents: List[Document], query: str) -> Document | None:
+        query_lower = query.lower()
+        results = []
 
         for doc in documents:
-            text = doc.page_content
-            # Split into paragraphs
-            paragraphs = re.split(r'\n\s*\n', text)
+            lines = doc.page_content.splitlines()
+            for i, line in enumerate(lines):
+                clean_line = line.strip()
+                if len(clean_line) < 4:
+                    continue
 
-            for para in paragraphs:
-                para_clean = para.strip().lower()
+                # Detect heading: uppercase, title case, or surrounded by whitespace
+                is_heading = (
+                    clean_line.isupper() or
+                    clean_line.istitle() or
+                    (len(clean_line) > 10 and clean_line.lower().startswith(query_lower[:3]))
+                )
 
-                # Exact match anywhere in paragraph
-                if query_lower in para_clean:
-                    return Document(page_content=para.strip(), metadata=doc.metadata)
+                # Check similarity to the query
+                sim_score = self.similar(clean_line, query)
 
-                # Approximate match on heading lines
-                lines = para.strip().splitlines()
-                if lines:
-                    heading = lines[0].strip()
-                    if self.similar(heading, query) > 0.6:
-                        return Document(page_content=para.strip(), metadata=doc.metadata)
+                if is_heading and sim_score > 0.4:
+                    # Collect following lines that form the section
+                    section_lines = [clean_line]
+                    for j in range(i + 1, len(lines)):
+                        next_line = lines[j].strip()
+                        if not next_line:
+                            break
+                        section_lines.append(next_line)
+                    content = "\n".join(section_lines).strip()
+                    results.append((sim_score, Document(page_content=content, metadata=doc.metadata)))
 
+        if results:
+            # Return the highest similarity result
+            results.sort(key=lambda x: x[0], reverse=True)
+            return results[0][1]
         return None
 
     def answer(self, user_input: str, top_k: int = 5):
@@ -85,22 +89,21 @@ class PDFQAAgent:
         if not self.vector_store.vectordb:
             raise ValueError("Vector store is empty. Please ingest a PDF first.")
 
-        # Retrieve relevant documents
         retriever = self.vector_store.vectordb.as_retriever(
             search_type="mmr",
             search_kwargs={"k": top_k * 3},
         )
         candidates = retriever.get_relevant_documents(question_text)
 
-        # Try exact section match based on similarity
-        exact_section = self.find_exact_section(candidates, question_text)
+        # First attempt: find section by pattern and similarity
+        exact_section = self.find_section_by_pattern(candidates, question_text)
         if exact_section:
             return {
                 "answer": exact_section.page_content.strip(),
                 "sources": [exact_section]
             }
 
-        # Fallback: rerank with LLM if no exact section found
+        # Fallback: rerank with LLM if no exact match found
         reranked_docs = rerank_with_llm(question_text, candidates, top_k=top_k)
         if not reranked_docs:
             return {"answer": "⚠️ No relevant content found.", "sources": []}
