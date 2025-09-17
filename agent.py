@@ -8,6 +8,7 @@ from reranker import rerank_with_llm
 from config import LLM_MODEL, GOOGLE_API_KEY
 from langchain_google_genai import ChatGoogleGenerativeAI
 import re
+from difflib import SequenceMatcher
 
 class PDFQAAgent:
     def __init__(self):
@@ -16,16 +17,19 @@ class PDFQAAgent:
         self.question_map: Dict[int, str] = {}
 
     def ingest(self, pdf_path: str, progress_callback: Callable = None) -> int:
-        """Ingest PDF, split, map questions, and build vector store."""
+        # Load PDF
         docs: List[Document] = load_pdf(pdf_path)
         if not docs:
             raise ValueError("No valid content found in PDF to ingest.")
 
+        # Map numbered questions dynamically
         full_text = "\n".join([d.page_content for d in docs])
         self._map_questions(full_text)
 
+        # Build vector store
         self.vector_store.build(docs, source_file=pdf_path, progress_callback=progress_callback)
 
+        # Build retriever and QA chain
         retriever = self.vector_store.vectordb.as_retriever(
             search_type="similarity_score_threshold",
             search_kwargs={"k": 8, "score_threshold": 0.3},
@@ -35,7 +39,7 @@ class PDFQAAgent:
         return len(docs)
 
     def _map_questions(self, text: str):
-        """Map numbered questions in PDF dynamically by parsing text patterns."""
+        """Dynamically map numbered questions in PDF"""
         pattern = re.compile(r'(\d+)[\.:]\s*(.+?)(?=(\n\d+[\.:])|\Z)', re.DOTALL)
         matches = pattern.findall(text)
         for match in matches:
@@ -43,49 +47,60 @@ class PDFQAAgent:
             q_text = match[1].strip().replace("\n", " ")
             self.question_map[q_num] = q_text
 
+    def similar(self, a: str, b: str) -> float:
+        """Compute similarity between two strings."""
+        return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
     def find_exact_section(self, documents: List[Document], query: str) -> Document | None:
         """
-        Find the exact section that contains the query.
-        Looks for paragraphs or blocks containing the query text exactly.
+        Find the section that contains or closely matches the query.
+        Searches for exact and approximate matches in headings and paragraphs.
         """
         query_lower = query.strip().lower()
 
         for doc in documents:
             text = doc.page_content
-            # Split into paragraphs by double newline or lines separated by punctuation
+            # Split into paragraphs
             paragraphs = re.split(r'\n\s*\n', text)
+
             for para in paragraphs:
-                if query_lower in para.lower():
+                para_clean = para.strip().lower()
+
+                # Exact match anywhere in paragraph
+                if query_lower in para_clean:
                     return Document(page_content=para.strip(), metadata=doc.metadata)
+
+                # Approximate match on heading lines
+                lines = para.strip().splitlines()
+                if lines:
+                    heading = lines[0].strip()
+                    if self.similar(heading, query) > 0.6:
+                        return Document(page_content=para.strip(), metadata=doc.metadata)
+
         return None
 
     def answer(self, user_input: str, top_k: int = 5):
-        """Answer the question using exact match or fallback to LLM reranking."""
         question_text = user_input.strip()
-
-        numeric_match = re.match(r'(\d+)\s*question', question_text.lower())
-        if numeric_match:
-            q_num = int(numeric_match.group(1))
-            if q_num in self.question_map:
-                question_text = self.question_map[q_num]
-            else:
-                return {"answer": f"⚠️ Question {q_num} not found in PDF.", "sources": []}
 
         if not self.vector_store.vectordb:
             raise ValueError("Vector store is empty. Please ingest a PDF first.")
 
+        # Retrieve relevant documents
         retriever = self.vector_store.vectordb.as_retriever(
             search_type="mmr",
             search_kwargs={"k": top_k * 3},
         )
         candidates = retriever.get_relevant_documents(question_text)
 
-        # First attempt exact match section search
-        exact_doc = self.find_exact_section(candidates, question_text)
-        if exact_doc:
-            return {"answer": exact_doc.page_content.strip(), "sources": [exact_doc]}
+        # Try exact section match based on similarity
+        exact_section = self.find_exact_section(candidates, question_text)
+        if exact_section:
+            return {
+                "answer": exact_section.page_content.strip(),
+                "sources": [exact_section]
+            }
 
-        # Fallback to LLM rerank if exact not found
+        # Fallback: rerank with LLM if no exact section found
         reranked_docs = rerank_with_llm(question_text, candidates, top_k=top_k)
         if not reranked_docs:
             return {"answer": "⚠️ No relevant content found.", "sources": []}
