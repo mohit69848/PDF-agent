@@ -46,6 +46,25 @@ class PDFQAAgent:
             q_text = match[1].strip().replace("\n", " ")
             self.question_map[q_num] = q_text
 
+    def find_reference_section(self, documents: List[Document]) -> Document | None:
+        """Detect reference sections dynamically based on patterns"""
+        for doc in documents:
+            lines = doc.page_content.splitlines()
+            for i, line in enumerate(lines):
+                clean_line = line.strip()
+                is_upper = clean_line.isupper() and len(clean_line) > 4
+                is_end = i >= len(lines) - 5
+                next_lines = lines[i+1:i+4] if i+4 <= len(lines) else lines[i+1:]
+                looks_like_citation = any(
+                    re.match(r'^\s*[\d\-\*\.\)]', nl.strip()) or "http" in nl for nl in next_lines
+                )
+                punct_count = sum(1 for c in clean_line if c in ".,;:[]()")
+                is_punctuated = punct_count >= 2
+
+                if is_upper and (looks_like_citation or is_end or is_punctuated):
+                    return doc
+        return None
+
     def answer(self, user_input: str, top_k: int = 5):
         question_text = user_input.strip()
 
@@ -68,6 +87,14 @@ class PDFQAAgent:
         )
         candidates = retriever.get_relevant_documents(question_text)
 
+        # Check for reference section first
+        reference_doc = self.find_reference_section(candidates)
+        if reference_doc:
+            return {
+                "answer": reference_doc.page_content.strip(),
+                "sources": [reference_doc]
+            }
+
         # Remove duplicates
         seen = set()
         unique_candidates = []
@@ -85,21 +112,21 @@ class PDFQAAgent:
                 exact_answer = doc.page_content.strip()
                 break
 
+        if exact_answer:
+            return {
+                "answer": exact_answer,
+                "sources": unique_candidates
+            }
+
         # If no exact match, rerank
-        if not exact_answer:
-            reranked_docs = rerank_with_llm(question_text, unique_candidates, top_k=top_k)
-            exact_answer = "\n\n".join(
-                [f"[Page {d.metadata.get('page_number','N/A')}] {d.page_content}" for d in reranked_docs]
-            )
-        else:
-            reranked_docs = unique_candidates
+        reranked_docs = rerank_with_llm(question_text, unique_candidates, top_k=top_k)
+        if not reranked_docs:
+            return {"answer": "⚠️ No relevant content found.", "sources": []}
 
-        # Summarize using LLM if documents are available
-        if reranked_docs:
-            context = "\n\n".join([f"[Page {d.metadata.get('page_number','N/A')}] {d.page_content}" for d in reranked_docs])
-            llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY)
+        context = "\n\n".join([f"[Page {d.metadata.get('page_number','N/A')}] {d.page_content}" for d in reranked_docs])
+        llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY)
 
-            prompt = f"""
+        prompt = f"""
 You are an AI assistant. The user asked: "{question_text}"
 
 Relevant text chunks:
@@ -115,9 +142,10 @@ Instructions:
 3. Avoid repeating information.
 4. Only include content from the provided text.
 """
-            result = llm.invoke([HumanMessage(content=prompt)])
-            summary = result.content if result else exact_answer
-        else:
-            summary = exact_answer or "⚠️ No relevant content found."
+        result = llm.invoke([HumanMessage(content=prompt)])
+        summary = result.content if result else "⚠️ No relevant content found."
 
-        return {"answer": summary, "sources": reranked_docs}
+        return {
+            "answer": summary,
+            "sources": reranked_docs
+        }
