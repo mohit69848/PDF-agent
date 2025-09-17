@@ -1,3 +1,4 @@
+# loader.py
 from langchain_community.document_loaders import PyMuPDFLoader, UnstructuredPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.docstore.document import Document
@@ -5,6 +6,10 @@ from typing import List
 import os
 
 def load_pdf(path: str) -> List[Document]:
+    """
+    Load a PDF file and split it into chunks dynamically based on file size.
+    Handles scanned PDFs via OCR if normal extraction fails.
+    """
     file_size_mb = os.path.getsize(path) / (1024 * 1024)
 
     # Adaptive chunk size
@@ -17,6 +22,7 @@ def load_pdf(path: str) -> List[Document]:
     else:
         chunk_size, chunk_overlap = 400, 50
 
+    # Try normal text extraction
     try:
         loader = PyMuPDFLoader(path)
         pages = loader.load()
@@ -27,14 +33,16 @@ def load_pdf(path: str) -> List[Document]:
         loader = UnstructuredPDFLoader(path, strategy="ocr_only")
         pages = loader.load()
 
+    # Clean pages and add page numbers
     cleaned_docs = []
     for i, page in enumerate(pages):
         text = page.page_content.strip()
         meta = dict(page.metadata)
         meta["page_number"] = i + 1
-        if len(text) > 30:
+        if len(text) > 30:  # ignore empty pages
             cleaned_docs.append(Document(page_content=text, metadata=meta))
 
+    # Split into chunks
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,

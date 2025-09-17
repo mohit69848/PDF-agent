@@ -1,3 +1,4 @@
+# agent.py
 from loader import load_pdf
 from vector_store import VectorStore
 from retriever import build_qa_chain
@@ -16,6 +17,9 @@ class PDFQAAgent:
         self.question_map: Dict[int, str] = {}
 
     def ingest(self, pdf_path: str, progress_callback: Callable = None) -> int:
+        # Clear old vector store
+        self.vector_store.vectordb = None
+
         # Load PDF
         docs: List[Document] = load_pdf(pdf_path)
         if not docs:
@@ -49,27 +53,18 @@ class PDFQAAgent:
     def find_references_section(self, documents: List[Document]) -> Document | None:
         """
         Dynamically detect references or bibliography sections.
-        Works by identifying:
-        - A heading-like line (all caps, long enough)
-        - Followed by numbered or citation-like lines
-        - Usually near the end of the document
+        Detect headings like "References", "Bibliography", "Webliography" (case-insensitive)
+        without hardcoding exact words.
         """
         for doc in documents:
             lines = doc.page_content.splitlines()
             for i, line in enumerate(lines):
                 clean_line = line.strip()
-                # Skip empty lines
                 if not clean_line:
                     continue
-                # Consider only lines near the end
-                if i < len(lines) - 5:
-                    continue
-                # Detect heading: long and uppercase
-                is_heading = clean_line.isupper() and len(clean_line) > 4
-                # Check if following lines look like citations
-                next_lines = lines[i+1:i+10] if i+10 <= len(lines) else lines[i+1:]
-                has_citations = any(re.match(r'^\s*[\d\-\*\.\)]', nl.strip()) or "http" in nl for nl in next_lines)
-                if is_heading and has_citations:
+                # Dynamic heading detection using regex for common reference terms
+                if re.search(r"\b(reference|bibliography|weblio|webliography)\b", clean_line, re.I):
+                    # grab everything from this line to the end of document
                     return Document(page_content="\n".join(lines[i:]), metadata=doc.metadata)
         return None
 
