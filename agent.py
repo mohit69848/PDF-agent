@@ -63,10 +63,10 @@ class PDFQAAgent:
                 if not clean_line:
                     continue
 
-                # Detect headings (upper-case or title-like)
+                # Improved heading detection
                 is_heading = (
-                    (clean_line.isupper() and len(clean_line) > 3)
-                    or (clean_line.istitle() and len(clean_line) > 4)
+                    clean_line.isupper()
+                    or re.match(r'^[A-Z][A-Za-z\s\-:]{2,50}$', clean_line)  # Handles "Disclaimer:", "References"
                 )
 
                 # If heading matches query
@@ -79,7 +79,7 @@ class PDFQAAgent:
                         if not next_clean:
                             continue
 
-                        # A heading is valid if ALL CAPS + short-ish (likely a new section title)
+                        # Detect next heading (stop condition)
                         is_next_heading = (
                             next_clean.isupper()
                             and len(next_clean.split()) <= 6
@@ -87,7 +87,7 @@ class PDFQAAgent:
                         )
 
                         if is_next_heading:
-                            break  # stop at new heading
+                            break
 
                         section_lines.append(next_clean)
 
@@ -117,19 +117,26 @@ class PDFQAAgent:
         if section_doc:
             return {"answer": section_doc.page_content.strip(), "sources": [section_doc]}
 
-        # If not found, fallback to similarity search
+        # Retrieve candidates (similarity search)
         retriever = self.vector_store.vectordb.as_retriever(
             search_type="mmr",
             search_kwargs={"k": top_k * 3},
         )
         candidates = retriever.get_relevant_documents(question_text)
 
+        # 🔹 Force include keyword matches across all docs
+        keyword_hits = [
+            d for d in self.documents
+            if question_text.lower() in d.page_content.lower()
+        ]
+        candidates.extend(keyword_hits)
+
         # Try exact text match in candidates
         for doc in candidates:
             if question_text.lower() in doc.page_content.lower():
                 return {"answer": doc.page_content.strip(), "sources": [doc]}
 
-        # Fallback to reranker
+        # Rerank candidates with LLM
         reranked_docs = rerank_with_llm(question_text, candidates, top_k=top_k)
         if not reranked_docs:
             return {"answer": "⚠️ No relevant content found.", "sources": []}
@@ -139,16 +146,20 @@ class PDFQAAgent:
         )
         llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY)
 
+        # 🔹 Stricter prompt
         prompt = f"""
+You are answering strictly from the document text.
+
 User question: "{question_text}"
 
 Relevant extracted text:
 {context}
 
-Rules:
-- Preserve exact wording if possible.
-- If from OCR, prefix with 'Extracted from image:'.
-- Never invent answers beyond provided text.
+Instructions:
+- If the extracted text contains the answer, return it VERBATIM (preserve formatting, line breaks, bullet points).
+- If it’s from OCR, prefix with: "Extracted from image:"
+- Never summarize or paraphrase unless the text is too long to fit.
+- If no relevant text exists, reply only: "⚠️ No relevant section found in the document."
 """
         result = llm.invoke([HumanMessage(content=prompt)])
         summary = result.content if result else "⚠️ No relevant content found."
