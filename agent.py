@@ -1,21 +1,13 @@
-# pdf_qa_agent.py
 from loader import load_pdf
 from vector_store import VectorStore
 from retriever import build_qa_chain
 from langchain.docstore.document import Document
 from langchain_core.messages import HumanMessage
-from reranker import rerank_with_llm
-from config import LLM_MODEL, GOOGLE_API_KEY, EMBEDDING_PROVIDER, LOCAL_EMBEDDING_MODEL
-from langchain_google_genai import ChatGoogleGenerativeAI
 from typing import List, Callable, Dict
+from reranker import rerank_with_llm
+from config import LLM_MODEL, GOOGLE_API_KEY
+from langchain_google_genai import ChatGoogleGenerativeAI
 import re
-
-# # Optional: local semantic search
-# if EMBEDDING_PROVIDER == "local" and LOCAL_EMBEDDING_MODEL:
-from sentence_transformers import util
-# else:
-#     SentenceTransformer = None
-
 
 class PDFQAAgent:
     def __init__(self):
@@ -24,22 +16,17 @@ class PDFQAAgent:
         self.documents: List[Document] = []
         self.question_map: Dict[int, str] = {}
 
-        # # Initialize local semantic search if available
-        # if SentenceTransformer:
-        #     self.section_detector = SentenceTransformer(LOCAL_EMBEDDING_MODEL)
-        # else:
-        self.section_detector = None
-
     # -----------------------------
     # PDF ingestion
     # -----------------------------
     def ingest(self, pdf_path: str, progress_callback: Callable = None) -> int:
-        """Load PDF, split into chunks, build vector store, and map numbered questions."""
         docs: List[Document] = load_pdf(pdf_path)
         if not docs:
             raise ValueError("No valid content found in PDF.")
 
         self.documents = docs
+
+        # Map numbered questions
         full_text = "\n".join([d.page_content for d in docs])
         self._map_questions(full_text)
 
@@ -69,7 +56,6 @@ class PDFQAAgent:
     # Section-aware search
     # -----------------------------
     def find_section(self, query: str) -> List[Document]:
-        """Keyword-based section matching across chunks."""
         query_keywords = set(query.lower().split())
         matched_docs = []
 
@@ -83,51 +69,33 @@ class PDFQAAgent:
                 if not clean_line:
                     continue
 
+                # Start section if keyword found
                 if any(word in clean_line.lower() for word in query_keywords):
                     inside_section = True
 
                 if inside_section:
                     section_lines.append(clean_line)
-                    # End at next heading
-                    if (
-                        i + 1 < len(lines)
-                        and lines[i + 1].isupper()
-                        and len(lines[i + 1].split()) <= 8
-                    ):
+
+                    # Stop if next line looks like heading
+                    if i + 1 < len(lines) and lines[i + 1].isupper() and len(lines[i + 1].split()) <= 8:
                         inside_section = False
                         break
 
             if section_lines:
-                matched_docs.append(Document(page_content="\n".join(section_lines), metadata=doc.metadata))
+                matched_docs.append(Document(
+                    page_content="\n".join(section_lines),
+                    metadata=doc.metadata
+                ))
 
         return matched_docs
 
     # -----------------------------
-    # Optional: semantic section search
-    # -----------------------------
-    def find_section_semantic(self, query: str, threshold: float = 0.6) -> List[Document]:
-        """Use local embeddings to find semantically relevant sections."""
-        if not self.documents or not self.section_detector:
-            return []
-
-        query_emb = self.section_detector.encode(query, convert_to_tensor=True)
-        matched_docs = []
-
-        for doc in self.documents:
-            doc_emb = self.section_detector.encode(doc.page_content, convert_to_tensor=True)
-            score = util.cos_sim(query_emb, doc_emb).item()
-            if score >= threshold:
-                matched_docs.append(doc)
-
-        return matched_docs
-
-    # -----------------------------
-    # Main answer function
+    # Answer function
     # -----------------------------
     def answer(self, user_input: str, top_k: int = 5):
         question_text = user_input.strip()
 
-        # Numeric questions e.g., "5 question"
+        # Numeric question handling
         numeric_match = re.match(r'(\d+)\s*question', question_text.lower())
         if numeric_match:
             q_num = int(numeric_match.group(1))
@@ -139,28 +107,34 @@ class PDFQAAgent:
         if not self.vector_store.vectordb:
             raise ValueError("Vector store not initialized. Please ingest a PDF.")
 
-        # 1. Semantic search if available
-        semantic_docs = self.find_section_semantic(question_text) if self.section_detector else []
-        if semantic_docs:
-            return {"answer": "\n\n".join(d.page_content for d in semantic_docs), "sources": semantic_docs}
-
-        # 2. Keyword section search
+        # 1. Section-aware search
         section_docs = self.find_section(question_text)
         if section_docs:
-            return {"answer": "\n\n".join(d.page_content for d in section_docs), "sources": section_docs}
+            return {
+                "answer": "\n\n".join(d.page_content for d in section_docs).strip(),
+                "sources": section_docs
+            }
 
-        # 3. Vector similarity search
+        # 2. Vector similarity search
         retriever = self.vector_store.vectordb.as_retriever(search_type="mmr", search_kwargs={"k": top_k * 3})
         candidates = retriever.get_relevant_documents(question_text)
 
-        # 4. Keyword fallback
-        candidates.extend([d for d in self.documents if question_text.lower() in d.page_content.lower()])
+        # 3. Keyword fallback
+        keyword_hits = [d for d in self.documents if question_text.lower() in d.page_content.lower()]
+        # Merge candidates, remove duplicates
+        seen_ids = set()
+        merged_candidates = []
+        for d in candidates + keyword_hits:
+            doc_id = d.metadata.get("source") or d.metadata.get("page_number") or id(d)
+            if doc_id not in seen_ids:
+                merged_candidates.append(d)
+                seen_ids.add(doc_id)
 
-        if not candidates:
+        if not merged_candidates:
             return {"answer": "⚠️ No relevant content found.", "sources": []}
 
-        # 5. Rerank with LLM
-        reranked_docs = rerank_with_llm(question_text, candidates, top_k=top_k)
+        # 4. Rerank with LLM
+        reranked_docs = rerank_with_llm(question_text, merged_candidates, top_k=top_k)
         if not reranked_docs:
             return {"answer": "⚠️ No relevant content found.", "sources": []}
 
@@ -176,10 +150,10 @@ Relevant text:
 {context}
 
 Instructions:
-- Answer using ONLY this text, return it VERBATIM.
+- Answer using ONLY the text above, VERBATIM.
 - Preserve formatting, bullets, line breaks.
-- If it comes from OCR/image, prefix with "Extracted from image:".
-- If nothing matches, return only: ⚠️ No relevant content found.
+- If text is from OCR, prefix with: "Extracted from image:"
+- If nothing matches, return only: "⚠️ No relevant section found in the document."
 """
         result = llm.invoke([HumanMessage(content=prompt)])
         summary = result.content if result else "⚠️ No relevant content found."
