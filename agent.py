@@ -9,7 +9,6 @@ from config import LLM_MODEL, GOOGLE_API_KEY
 from langchain_google_genai import ChatGoogleGenerativeAI
 import re
 
-
 class PDFQAAgent:
     def __init__(self):
         self.vector_store = VectorStore()
@@ -18,7 +17,9 @@ class PDFQAAgent:
         self.question_map: Dict[int, str] = {}
 
     def ingest(self, pdf_path: str, progress_callback: Callable = None) -> int:
-        """Load PDF, map numbered questions, build vector store & QA chain"""
+        """
+        Load PDF, chunk it, build vector store, and map numbered questions.
+        """
         docs: List[Document] = load_pdf(pdf_path)
         if not docs:
             raise ValueError("No valid content found in PDF.")
@@ -29,7 +30,7 @@ class PDFQAAgent:
         full_text = "\n".join([d.page_content for d in docs])
         self._map_questions(full_text)
 
-        # Build vector store for fallback
+        # Build vector store for fallback retrieval
         self.vector_store.build(docs, source_file=pdf_path, progress_callback=progress_callback)
 
         # Build QA chain
@@ -42,7 +43,9 @@ class PDFQAAgent:
         return len(docs)
 
     def _map_questions(self, text: str):
-        """Map numbered questions dynamically from PDF text"""
+        """
+        Detect numbered questions dynamically and store in question_map.
+        """
         pattern = re.compile(r'(\d+)[\.:]\s*(.+?)(?=(\n\d+[\.:])|\Z)', re.DOTALL)
         matches = pattern.findall(text)
         for match in matches:
@@ -50,55 +53,59 @@ class PDFQAAgent:
             q_text = match[1].strip().replace("\n", " ")
             self.question_map[q_num] = q_text
 
-    def find_section(self, query: str) -> Document | None:
+    def find_section(self, query: str) -> List[Document]:
         """
-        Dynamically find a section by heading and return all text under it
-        until the next heading or large gap.
+        Dynamically find sections matching query keywords across all chunks.
+        Works even if headings are not uppercase.
         """
         query_keywords = set(query.lower().split())
+        matched_docs = []
 
         for doc in self.documents:
             lines = doc.page_content.splitlines()
+            section_lines = []
+            inside_section = False
+
             for i, line in enumerate(lines):
                 clean_line = line.strip()
                 if not clean_line:
                     continue
 
-                # Detect headings dynamically
-                is_heading = (
-                    clean_line.isupper()
-                    or re.match(r'^[A-Z][A-Za-z\s\-:]{2,50}$', clean_line)
-                )
+                # Treat any line containing the keyword as a start of a section
+                if any(word in clean_line.lower() for word in query_keywords):
+                    inside_section = True
 
-                # Check if heading matches any query keyword
-                if is_heading and any(word in clean_line.lower() for word in query_keywords):
-                    section_lines = [clean_line]
+                if inside_section:
+                    section_lines.append(clean_line)
 
-                    # Collect text until next heading
-                    for next_line in lines[i + 1:]:
-                        next_clean = next_line.strip()
-                        if not next_clean:
-                            continue
-                        is_next_heading = (
-                            next_clean.isupper()
-                            and len(next_clean.split()) <= 6
-                            and len(next_clean) > 3
-                        )
-                        if is_next_heading:
-                            break
-                        section_lines.append(next_clean)
-
-                    return Document(
-                        page_content="\n".join(section_lines),
-                        metadata=doc.metadata,
+                    # Detect next heading or empty line as end of section
+                    is_next_heading = (
+                        clean_line.isupper() and len(clean_line.split()) <= 8
                     )
-        return None
+                    if is_next_heading and not any(word in clean_line.lower() for word in query_keywords):
+                        inside_section = False
+                        if section_lines:
+                            matched_docs.append(Document(
+                                page_content="\n".join(section_lines),
+                                metadata=doc.metadata
+                            ))
+                            section_lines = []
+
+            # Append remaining section if any
+            if section_lines:
+                matched_docs.append(Document(
+                    page_content="\n".join(section_lines),
+                    metadata=doc.metadata
+                ))
+
+        return matched_docs
 
     def answer(self, user_input: str, top_k: int = 5):
         """
-        Answer user query dynamically:
-        - First try exact section match
-        - Then fallback to retriever + reranker
+        Answer a question about the PDF using:
+        - Numbered questions
+        - Section matching
+        - Vector retrieval and LLM reranking
         """
         question_text = user_input.strip()
 
@@ -114,34 +121,34 @@ class PDFQAAgent:
         if not self.vector_store.vectordb:
             raise ValueError("Vector store not initialized. Please ingest a PDF.")
 
-        # 1️⃣ Try exact section match
-        section_doc = self.find_section(question_text)
-        if section_doc:
-            return {"answer": section_doc.page_content.strip(), "sources": [section_doc]}
+        # First, attempt section match dynamically
+        section_docs = self.find_section(question_text)
+        if section_docs:
+            # Merge all matched sections
+            merged_text = "\n\n".join(d.page_content for d in section_docs)
+            return {"answer": merged_text.strip(), "sources": section_docs}
 
-        # 2️⃣ Retrieve candidates (similarity search)
+        # Retrieve candidates (similarity search)
         retriever = self.vector_store.vectordb.as_retriever(
             search_type="mmr",
             search_kwargs={"k": top_k * 3},
         )
         candidates = retriever.get_relevant_documents(question_text)
 
-        # 🔹 Filter candidates by keywords in first 20 words to avoid irrelevant sections
-        query_keywords = set(question_text.lower().split())
-        filtered_candidates = []
-        for d in candidates:
-            snippet = " ".join(d.page_content.split()[:20]).lower()
-            if any(word in snippet for word in query_keywords):
-                filtered_candidates.append(d)
+        # Include keyword matches across all docs
+        keyword_hits = [
+            d for d in self.documents
+            if question_text.lower() in d.page_content.lower()
+        ]
+        candidates.extend(keyword_hits)
 
-        # Deduplicate
-        filtered_candidates = list({id(d): d for d in filtered_candidates}.values())
+        # Try exact text match in candidates
+        for doc in candidates:
+            if question_text.lower() in doc.page_content.lower():
+                return {"answer": doc.page_content.strip(), "sources": [doc]}
 
-        if not filtered_candidates:
-            return {"answer": "⚠️ No relevant section found in the document.", "sources": []}
-
-        # 3️⃣ Rerank candidates using LLM
-        reranked_docs = rerank_with_llm(question_text, filtered_candidates, top_k=top_k)
+        # Rerank candidates with LLM
+        reranked_docs = rerank_with_llm(question_text, candidates, top_k=top_k)
         if not reranked_docs:
             return {"answer": "⚠️ No relevant content found.", "sources": []}
 
@@ -150,8 +157,9 @@ class PDFQAAgent:
         )
         llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY)
 
+        # Stricter LLM prompt
         prompt = f"""
-Answer strictly from the document text.
+You are answering strictly from the document text.
 
 User question: "{question_text}"
 
@@ -159,10 +167,10 @@ Relevant extracted text:
 {context}
 
 Instructions:
-- Return the answer verbatim, preserve formatting.
-- Prefix "Extracted from image:" if OCR text.
-- Never summarize unless text exceeds max length.
-- If no relevant text exists, reply: "⚠️ No relevant section found in the document."
+- If the extracted text contains the answer, return it VERBATIM (preserve formatting, line breaks, bullet points).
+- If it’s from OCR, prefix with: "Extracted from image:"
+- Never summarize or paraphrase unless the text is too long to fit.
+- If no relevant text exists, reply only: "⚠️ No relevant section found in the document."
 """
         result = llm.invoke([HumanMessage(content=prompt)])
         summary = result.content if result else "⚠️ No relevant content found."
