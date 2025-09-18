@@ -9,6 +9,7 @@ from config import LLM_MODEL, GOOGLE_API_KEY
 from langchain_google_genai import ChatGoogleGenerativeAI
 import re
 
+
 class PDFQAAgent:
     def __init__(self):
         self.vector_store = VectorStore()
@@ -50,8 +51,8 @@ class PDFQAAgent:
 
     def find_section(self, query: str) -> Document | None:
         """
-         Find the section by heading (e.g., DISCLAIMER) and return all text under it
-        until the next heading or large gap.
+        Find a section by heading (e.g., DISCLAIMER) and return all text under it
+        until the next heading or a large gap.
         """
         query_lower = query.strip().lower()
 
@@ -62,24 +63,38 @@ class PDFQAAgent:
                 if not clean_line:
                     continue
 
-                # Heuristic to detect headers: upper case or capitalized long lines
+                # Detect headings (upper-case or title-like)
                 is_heading = (
-                    clean_line.isupper() and len(clean_line) > 4
-                ) or (clean_line.istitle() and len(clean_line) > 4)
+                    (clean_line.isupper() and len(clean_line) > 3)
+                    or (clean_line.istitle() and len(clean_line) > 4)
+                )
 
-                # Check if query matches heading
+                # If heading matches query
                 if is_heading and query_lower in clean_line.lower():
-                    # Collect the heading and subsequent content till next heading or page end
                     section_lines = [clean_line]
-                    for next_line in lines[i+1:]:
+
+                    # Collect everything until next clear heading
+                    for next_line in lines[i + 1:]:
                         next_clean = next_line.strip()
                         if not next_clean:
                             continue
-                        # Stop if next heading detected
-                        if (next_clean.isupper() and len(next_clean) > 4) or (next_clean.istitle() and len(next_clean) > 4):
-                            break
+
+                        # A heading is valid if ALL CAPS + short-ish (likely a new section title)
+                        is_next_heading = (
+                            next_clean.isupper()
+                            and len(next_clean.split()) <= 6
+                            and len(next_clean) > 3
+                        )
+
+                        if is_next_heading:
+                            break  # stop at new heading
+
                         section_lines.append(next_clean)
-                    return Document(page_content="\n".join(section_lines), metadata=doc.metadata)
+
+                    return Document(
+                        page_content="\n".join(section_lines),
+                        metadata=doc.metadata,
+                    )
         return None
 
     def answer(self, user_input: str, top_k: int = 5):
@@ -119,30 +134,21 @@ class PDFQAAgent:
         if not reranked_docs:
             return {"answer": "⚠️ No relevant content found.", "sources": []}
 
-        context = "\n\n".join([
-            f"[Page {d.metadata.get('page_number','N/A')}] {d.page_content}" for d in reranked_docs
-        ])
+        context = "\n\n".join(
+            [f"[Page {d.metadata.get('page_number','N/A')}] {d.page_content}" for d in reranked_docs]
+        )
         llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY)
 
         prompt = f"""
-You are a PDF Question Answering AI. The user has uploaded a document and is asking questions about it.
+User question: "{question_text}"
 
-User Question:
-{question_text}
-
-Relevant Extracted Text (may include OCR output, bullet points, or paragraphs):
+Relevant extracted text:
 {context}
 
-Instructions:
-1. Summarize concisely.
-2. If the answer is explicitly stated in the extracted text, return it VERBATIM (do not rephrase).
-3. If the extracted text contains multiple bullet points or paragraphs relevant to the question, return the FULL block of text without summarizing.
-4. If the text was extracted from an image (OCR), prefix the response with: "Extracted from image:".
-5. Always preserve the original formatting (line breaks, bullet points, capitalization).
-6. Include the source page number(s) at the end of your answer in this format:  
-   Source: Page X (or Pages X–Y if multiple).
-7. Do NOT add interpretations, assumptions, or extra commentary. Only return what is explicitly present in the document.
-8. If no relevant content is found, reply: "⚠️ No relevant content found in the document."
+Rules:
+- Preserve exact wording if possible.
+- If from OCR, prefix with 'Extracted from image:'.
+- Never invent answers beyond provided text.
 """
         result = llm.invoke([HumanMessage(content=prompt)])
         summary = result.content if result else "⚠️ No relevant content found."
