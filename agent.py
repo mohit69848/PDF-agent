@@ -56,9 +56,10 @@ class PDFQAAgent:
     def find_section(self, query: str) -> List[Document]:
         """
         Dynamically find sections matching query keywords across all chunks.
-        Works even if headings are not uppercase.
+        Works even if headings are not uppercase,
+        returning the heading + full section content until the next heading.
         """
-        query_keywords = set(query.lower().split())
+        query_keywords = set(query)
         matched_docs = []
 
         for doc in self.documents:
@@ -79,17 +80,13 @@ class PDFQAAgent:
                     section_lines.append(clean_line)
 
                     # Detect next heading or empty line as end of section
-                    is_next_heading = (
-                        clean_line.isupper() and len(clean_line.split()) <= 8
-                    )
-                    if is_next_heading and not any(word in clean_line.lower() for word in query_keywords):
+                    if(
+                        i + 1 <len(lines)
+                        and lines[i + 1]. isupper()
+                        and len(lines[i + 1]. split()) <=8
+                    ):
                         inside_section = False
-                        if section_lines:
-                            matched_docs.append(Document(
-                                page_content="\n".join(section_lines),
-                                metadata=doc.metadata
-                            ))
-                            section_lines = []
+                        break
 
             # Append remaining section if any
             if section_lines:
