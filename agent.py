@@ -3,11 +3,12 @@ from vector_store import VectorStore
 from retriever import build_qa_chain
 from langchain.docstore.document import Document
 from langchain_core.messages import HumanMessage
-from typing import List, Callable, Dict, Tuple
+from typing import List, Callable, Dict
 from reranker import rerank_with_llm
 from config import LLM_MODEL, GOOGLE_API_KEY
 from langchain_google_genai import ChatGoogleGenerativeAI
 import re
+import difflib  # for fuzzy matching
 
 
 class PDFQAAgent:
@@ -16,21 +17,18 @@ class PDFQAAgent:
         self.qa_chain = None
         self.documents: List[Document] = []
         self.question_map: Dict[int, str] = {}
-        self.sections: List[Tuple[str, str, Dict]] = []  # (heading, content, metadata)
 
     def ingest(self, pdf_path: str, progress_callback: Callable = None) -> int:
         # Load PDF pages
         docs: List[Document] = load_pdf(pdf_path)
         if not docs:
             raise ValueError("No valid content found in PDF.")
+
         self.documents = docs
 
         # Map numbered questions dynamically
         full_text = "\n".join([d.page_content for d in docs])
         self._map_questions(full_text)
-
-        # Detect sections dynamically
-        self._detect_sections(docs)
 
         # Build vector store for fallback
         self.vector_store.build(docs, source_file=pdf_path, progress_callback=progress_callback)
@@ -41,6 +39,7 @@ class PDFQAAgent:
             search_kwargs={"k": 8, "score_threshold": 0.3},
         )
         self.qa_chain = build_qa_chain(retriever)
+
         return len(docs)
 
     def _map_questions(self, text: str):
@@ -51,57 +50,55 @@ class PDFQAAgent:
             q_text = match[1].strip().replace("\n", " ")
             self.question_map[q_num] = q_text
 
-    def _detect_sections(self, docs: List[Document]):
+    def _fuzzy_match(self, query: str, heading: str, threshold: float = 0.6) -> bool:
         """
-        Dynamically detect headings and their content in the document.
-        Stores them in self.sections as tuples: (heading, content, metadata)
+        Return True if query roughly matches heading using SequenceMatcher.
         """
-        heading_pattern = re.compile(
-            r'^(?P<heading>[A-Z][A-Z0-9\s\-\.:]{2,100})$', re.MULTILINE
-        )
+        ratio = difflib.SequenceMatcher(None, query.lower(), heading.lower()).ratio()
+        return ratio >= threshold
 
-        for doc in docs:
-            lines = doc.page_content.splitlines()
-            current_heading = None
-            buffer = []
-
-            for line in lines:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-
-                if heading_pattern.match(stripped):
-                    # Save previous section
-                    if current_heading and buffer:
-                        content = "\n".join(buffer).strip()
-                        self.sections.append((current_heading, content, doc.metadata))
-                    current_heading = stripped
-                    buffer = []
-                else:
-                    buffer.append(stripped)
-
-            # Add last section
-            if current_heading and buffer:
-                content = "\n".join(buffer).strip()
-                self.sections.append((current_heading, content, doc.metadata))
-
-    def _match_section(self, query: str) -> Document | None:
+    def find_section(self, query: str) -> Document | None:
         """
-        Match user query to the most relevant section using keyword search.
+        Find a section by heading and return all text under it until the next heading.
+        Matches headings with fuzzy/natural language queries.
         """
         query_lower = query.strip().lower()
 
-        best_match = None
-        for heading, content, metadata in self.sections:
-            # Check if query matches heading or appears in section content
-            if query_lower in heading.lower() or query_lower in content.lower():
-                best_match = Document(
-                    page_content=f"{heading}\n{content}",
-                    metadata=metadata
-                )
-                break
+        for doc in self.documents:
+            lines = doc.page_content.splitlines()
+            for i, line in enumerate(lines):
+                clean_line = line.strip()
+                if not clean_line:
+                    continue
 
-        return best_match
+                # Detect potential headings
+                is_heading = (
+                    clean_line.isupper()
+                    or re.match(r'^[A-Z][A-Za-z\s\-:]{2,50}$', clean_line)
+                )
+
+                if is_heading:
+                    # Check for fuzzy match with query
+                    if query_lower in clean_line.lower() or self._fuzzy_match(query_lower, clean_line):
+                        section_lines = [clean_line]  # start with heading itself
+
+                        # Collect lines until next heading
+                        for next_line in lines[i+1:]:
+                            next_clean = next_line.strip()
+                            if not next_clean:
+                                continue
+                            # Stop at next heading
+                            is_next_heading = next_clean.isupper() and len(next_clean.split()) <= 6
+                            if is_next_heading:
+                                break
+                            section_lines.append(next_clean)
+
+                        return Document(
+                            page_content="\n".join(section_lines),
+                            metadata=doc.metadata,
+                        )
+
+        return None
 
     def answer(self, user_input: str, top_k: int = 5):
         question_text = user_input.strip()
@@ -118,25 +115,23 @@ class PDFQAAgent:
         if not self.vector_store.vectordb:
             raise ValueError("Vector store not initialized. Please ingest a PDF.")
 
-        # Attempt dynamic section match first
-        section_doc = self._match_section(question_text)
+        # First, attempt exact/fuzzy section match
+        section_doc = self.find_section(question_text)
         if section_doc:
             return {"answer": section_doc.page_content.strip(), "sources": [section_doc]}
 
-        # Retrieve candidates (similarity search)
+        # Fallback to similarity search
         retriever = self.vector_store.vectordb.as_retriever(
             search_type="mmr",
             search_kwargs={"k": top_k * 3},
         )
         candidates = retriever.get_relevant_documents(question_text)
 
-        # Include keyword hits across all docs
-        keyword_hits = [
-            d for d in self.documents if question_text.lower() in d.page_content.lower()
-        ]
+        # Include keyword hits from full document
+        keyword_hits = [d for d in self.documents if question_text.lower() in d.page_content.lower()]
         candidates.extend(keyword_hits)
 
-        # Try exact text match in candidates
+        # Try exact match in candidates
         for doc in candidates:
             if question_text.lower() in doc.page_content.lower():
                 return {"answer": doc.page_content.strip(), "sources": [doc]}
@@ -160,10 +155,10 @@ Relevant extracted text:
 {context}
 
 Instructions:
-- If the extracted text contains the answer, return it VERBATIM (preserve formatting, line breaks, bullet points).
-- If it’s from OCR, prefix with: "Extracted from image:"
-- Never summarize or paraphrase unless the text is too long to fit.
-- If no relevant text exists, reply only: "⚠️ No relevant section found in the document."
+- Return the answer VERBATIM if it exists in context (preserve formatting, bullet points, line breaks)
+- If from OCR, prefix with "Extracted from image:"
+- Never summarize or paraphrase unless text is too long
+- If no relevant content exists, reply only: "⚠️ No relevant section found in the document."
 """
         result = llm.invoke([HumanMessage(content=prompt)])
         summary = result.content if result else "⚠️ No relevant content found."
