@@ -1,6 +1,6 @@
 # embeddings.py
 
-import os
+
 import asyncio
 from config import EMBEDDING_PROVIDER, GOOGLE_API_KEY, LOCAL_EMBEDDING_MODEL
 from langchain.embeddings import HuggingFaceEmbeddings
