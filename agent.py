@@ -9,6 +9,7 @@ from config import LLM_MODEL, GOOGLE_API_KEY
 from langchain_google_genai import ChatGoogleGenerativeAI
 import re
 
+
 class PDFQAAgent:
     def __init__(self):
         self.vector_store = VectorStore()
@@ -59,7 +60,7 @@ class PDFQAAgent:
         Works even if headings are not uppercase,
         returning the heading + full section content until the next heading.
         """
-        query_keywords = set(query)
+        query_keywords = set(query.lower().split())
         matched_docs = []
 
         for doc in self.documents:
@@ -80,10 +81,10 @@ class PDFQAAgent:
                     section_lines.append(clean_line)
 
                     # Detect next heading or empty line as end of section
-                    if(
-                        i + 1 <len(lines)
-                        and lines[i + 1]. isupper()
-                        and len(lines[i + 1]. split()) <=8
+                    if (
+                        i + 1 < len(lines)
+                        and lines[i + 1].isupper()
+                        and len(lines[i + 1].split()) <= 8
                     ):
                         inside_section = False
                         break
@@ -99,10 +100,11 @@ class PDFQAAgent:
 
     def answer(self, user_input: str, top_k: int = 5):
         """
-        Answer a question about the PDF using:
-        - Numbered questions
-        - Section matching
-        - Vector retrieval and LLM reranking
+        Answer a question about the PDF:
+        1. Section-aware search
+        2. Vector similarity retrieval
+        3. Keyword fallback
+        4. Rerank with LLM
         """
         question_text = user_input.strip()
 
@@ -118,33 +120,32 @@ class PDFQAAgent:
         if not self.vector_store.vectordb:
             raise ValueError("Vector store not initialized. Please ingest a PDF.")
 
-        # First, attempt section match dynamically
+        # 1. Section-aware search
         section_docs = self.find_section(question_text)
         if section_docs:
-            # Merge all matched sections
-            merged_text = "\n\n".join(d.page_content for d in section_docs)
-            return {"answer": merged_text.strip(), "sources": section_docs}
+            return {
+                "answer": "\n\n".join(d.page_content for d in section_docs),
+                "sources": section_docs
+            }
 
-        # Retrieve candidates (similarity search)
+        # 2. Vector similarity search
         retriever = self.vector_store.vectordb.as_retriever(
             search_type="mmr",
             search_kwargs={"k": top_k * 3},
         )
         candidates = retriever.get_relevant_documents(question_text)
 
-        # Include keyword matches across all docs
+        # 3. Keyword fallback
         keyword_hits = [
             d for d in self.documents
             if question_text.lower() in d.page_content.lower()
         ]
         candidates.extend(keyword_hits)
 
-        # Try exact text match in candidates
-        for doc in candidates:
-            if question_text.lower() in doc.page_content.lower():
-                return {"answer": doc.page_content.strip(), "sources": [doc]}
+        if not candidates:
+            return {"answer": "⚠️ No relevant content found.", "sources": []}
 
-        # Rerank candidates with LLM
+        # 4. Rerank with LLM
         reranked_docs = rerank_with_llm(question_text, candidates, top_k=top_k)
         if not reranked_docs:
             return {"answer": "⚠️ No relevant content found.", "sources": []}
@@ -152,22 +153,21 @@ class PDFQAAgent:
         context = "\n\n".join(
             [f"[Page {d.metadata.get('page_number','N/A')}] {d.page_content}" for d in reranked_docs]
         )
-        llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY)
 
-        # Stricter LLM prompt
+        llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY)
         prompt = f"""
-You are answering strictly from the document text.
+You are a strict PDF answering agent.
 
 User question: "{question_text}"
 
-Relevant extracted text:
+Relevant text:
 {context}
 
 Instructions:
-- If the extracted text contains the answer, return it VERBATIM (preserve formatting, line breaks, bullet points).
-- If it’s from OCR, prefix with: "Extracted from image:"
-- Never summarize or paraphrase unless the text is too long to fit.
-- If no relevant text exists, reply only: "⚠️ No relevant section found in the document."
+- Answer using ONLY this text, return it VERBATIM.
+- Preserve formatting, bullets, line breaks.
+- If it comes from OCR/image, prefix with "Extracted from image:".
+- If nothing matches, return only: ⚠️ No relevant content found.
 """
         result = llm.invoke([HumanMessage(content=prompt)])
         summary = result.content if result else "⚠️ No relevant content found."
