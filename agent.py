@@ -50,8 +50,8 @@ class PDFQAAgent:
 
     def find_section(self, query: str) -> Document | None:
         """
-        Dynamically find sections matching the query.
-        Scans the entire PDF for headings and nearby content.
+         Find the section by heading (e.g., DISCLAIMER) and return all text under it
+        until the next heading or large gap.
         """
         query_lower = query.strip().lower()
 
@@ -125,16 +125,24 @@ class PDFQAAgent:
         llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY)
 
         prompt = f"""
-You are an AI assistant. The user asked: "{question_text}"
+You are a PDF Question Answering AI. The user has uploaded a document and is asking questions about it.
 
-Relevant text chunks:
+User Question:
+{question_text}
+
+Relevant Extracted Text (may include OCR output, bullet points, or paragraphs):
 {context}
 
 Instructions:
 1. Summarize concisely.
-2. Include only information from the provided text.
-3. Avoid assumptions or unrelated data.
-4. Provide bullet points if applicable.
+2. If the answer is explicitly stated in the extracted text, return it VERBATIM (do not rephrase).
+3. If the extracted text contains multiple bullet points or paragraphs relevant to the question, return the FULL block of text without summarizing.
+4. If the text was extracted from an image (OCR), prefix the response with: "Extracted from image:".
+5. Always preserve the original formatting (line breaks, bullet points, capitalization).
+6. Include the source page number(s) at the end of your answer in this format:  
+   Source: Page X (or Pages X–Y if multiple).
+7. Do NOT add interpretations, assumptions, or extra commentary. Only return what is explicitly present in the document.
+8. If no relevant content is found, reply: "⚠️ No relevant content found in the document."
 """
         result = llm.invoke([HumanMessage(content=prompt)])
         summary = result.content if result else "⚠️ No relevant content found."
