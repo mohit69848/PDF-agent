@@ -94,16 +94,14 @@ class PDFQAAgent:
                     section_lines.append(clean_line)
                        
                       
-                if section_lines:
-                     matched_docs.append(Document(
-                         page_content="\n".join(section_lines),
-                         metadata=doc.metadata
+            if section_lines:
+                matched_docs.append(Document(
+                    page_content="\n".join(section_lines),
+                    metadata=doc.metadata
                     ))
                      # Return top matches if found
-                if matched_docs:
-                    return matched_docs[:top_k]
-              
-
+                # if matched_docs:
+                    
         # Semantic similarity as backup
         if self.section_embedder:
             query_vec = self.section_embedder.encode(query, convert_to_tensor=True)
