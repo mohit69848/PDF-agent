@@ -29,6 +29,10 @@ def rerank_with_llm(question: str, docs: List[Document], top_k: int = 5) -> List
             idx = int(token)
             if 0 <= idx < len(docs):
                 indices.append(idx)
+                # Ensure fallback if nothing valid returned
+                if not indices:
+                     indices = list(range(min(top_k, len(docs))))
+
 
     indices = list(dict.fromkeys(indices))[:top_k]
     return [docs[i] for i in indices]
