@@ -52,7 +52,8 @@ class PDFQAAgent:
     # Numbered question mapping
     # -----------------------------
     def _map_questions(self, text: str):
-        pattern = re.compile(r'(\d+)[\.:]\s*(.+?)(?=(\n\d+[\.:])|\Z)', re.DOTALL)
+        # Improved regex: matches "1.", "1:", "4: ..." even across newlines
+        pattern = re.compile(r'(\d+)[\.:]\s*(.+?)(?=(?:\n\d+[\.:])|\Z)', re.DOTALL)
         matches = pattern.findall(text)
         for match in matches:
             q_num = int(match[0])
@@ -117,11 +118,12 @@ class PDFQAAgent:
 
         question_text = user_input.strip()
 
-        # Handle numeric question reference
+        # Handle numeric question reference like "1 question"
         numeric_match = re.match(r'(\d+)\s*question', question_text.lower())
         if numeric_match:
             q_num = int(numeric_match.group(1))
             if q_num in self.question_map:
+                # Replace user query with the actual question text
                 question_text = self.question_map[q_num]
             else:
                 return {"answer": f"⚠️ Question {q_num} not found in PDF.", "sources": []}
@@ -140,11 +142,11 @@ class PDFQAAgent:
             section_docs = self.find_section(question_text, top_k=top_k)
             candidates.extend(section_docs)
 
-        # Step 3: Deduplicate
+        # Step 3: Deduplicate (page_number + hash of content)
         seen = set()
         unique_candidates = []
         for d in candidates:
-            doc_id = d.metadata.get("source") or d.metadata.get("page_number") or id(d)
+            doc_id = f"{d.metadata.get('page_number','N/A')}:{hash(d.page_content)}"
             if doc_id not in seen:
                 unique_candidates.append(d)
                 seen.add(doc_id)
