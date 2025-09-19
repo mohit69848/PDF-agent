@@ -10,6 +10,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from sentence_transformers import SentenceTransformer, util
 import re
 
+
 class PDFQAAgent:
     def __init__(self):
         self.vector_store = VectorStore()
@@ -36,10 +37,10 @@ class PDFQAAgent:
         full_text = "\n".join([d.page_content for d in docs])
         self._map_questions(full_text)
 
-        # Build vector store for QA fallback
+        # Build vector store for retrieval
         self.vector_store.build(docs, source_file=pdf_path, progress_callback=progress_callback)
 
-        # Build QA chain
+        # Build QA chain (not always used, but available)
         retriever = self.vector_store.vectordb.as_retriever(
             search_type="similarity_score_threshold",
             search_kwargs={"k": 8, "score_threshold": 0.3},
@@ -59,13 +60,13 @@ class PDFQAAgent:
             self.question_map[q_num] = q_text
 
     # -----------------------------
-    # Section-aware search (keyword + semantic)
+    # Section-aware keyword + semantic search (optional)
     # -----------------------------
     def find_section(self, query: str, top_k: int = 3) -> List[Document]:
         query_keywords = set(query.lower().split())
         matched_docs = []
 
-        # Keyword-based section search
+        # Keyword-based scan
         for doc in self.documents:
             lines = doc.page_content.splitlines()
             section_lines = []
@@ -91,7 +92,7 @@ class PDFQAAgent:
                     metadata=doc.metadata
                 ))
 
-        # Semantic similarity search (if local embedder exists)
+        # Semantic similarity (if local embedder exists)
         if self.section_embedder:
             query_vec = self.section_embedder.encode(query, convert_to_tensor=True)
             section_scores = []
@@ -108,12 +109,15 @@ class PDFQAAgent:
         return matched_docs
 
     # -----------------------------
-    # Answer function
+    # Core RAG Answer function
     # -----------------------------
-    def answer(self, user_input: str, top_k: int = 5):
+    def answer(self, user_input: str, top_k: int = 5, use_section_search: bool = True):
+        if not self.vector_store.vectordb:
+            raise ValueError("Vector store not initialized. Please ingest a PDF.")
+
         question_text = user_input.strip()
 
-        # Numeric question handling
+        # Handle numeric question reference
         numeric_match = re.match(r'(\d+)\s*question', question_text.lower())
         if numeric_match:
             q_num = int(numeric_match.group(1))
@@ -122,54 +126,56 @@ class PDFQAAgent:
             else:
                 return {"answer": f"⚠️ Question {q_num} not found in PDF.", "sources": []}
 
-        if not self.vector_store.vectordb:
-            raise ValueError("Vector store not initialized. Please ingest a PDF.")
-
-        # Section-aware search
-        section_docs = self.find_section(question_text, top_k=top_k)
-        if section_docs:
-            merged_text = "\n\n".join(d.page_content for d in section_docs)
-            return {"answer": merged_text.strip(), "sources": section_docs}
-
-        # Vector similarity retrieval
-        retriever = self.vector_store.vectordb.as_retriever(search_type="mmr", search_kwargs={"k": top_k * 3})
+        # Step 1: Retrieve from vector DB
+        retriever = self.vector_store.vectordb.as_retriever(
+            search_type="mmr", search_kwargs={"k": top_k * 3}
+        )
         candidates = retriever.get_relevant_documents(question_text)
 
-        # Include keyword hits
-        keyword_hits = [d for d in self.documents if question_text.lower() in d.page_content.lower()]
+        if not candidates:
+            return {"answer": "⚠️ No relevant section found in the document.", "sources": []}
+
+        # Step 2: Optional section-aware augmentation
+        if use_section_search:
+            section_docs = self.find_section(question_text, top_k=top_k)
+            candidates.extend(section_docs)
+
+        # Step 3: Deduplicate
         seen = set()
-        merged_candidates = []
-        for d in candidates + keyword_hits:
+        unique_candidates = []
+        for d in candidates:
             doc_id = d.metadata.get("source") or d.metadata.get("page_number") or id(d)
             if doc_id not in seen:
-                merged_candidates.append(d)
+                unique_candidates.append(d)
                 seen.add(doc_id)
 
-        if not merged_candidates:
-            return {"answer": "⚠️ No relevant content found.", "sources": []}
+        # Step 4: Rerank
+        reranked_docs = rerank_with_llm(question_text, unique_candidates, top_k=top_k)
 
-        # Rerank with LLM
-        reranked_docs = rerank_with_llm(question_text, merged_candidates, top_k=top_k)
         if not reranked_docs:
-            return {"answer": "⚠️ No relevant content found.", "sources": []}
+            return {"answer": "⚠️ No relevant section found in the document.", "sources": []}
 
-        context = "\n\n".join([f"[Page {d.metadata.get('page_number','N/A')}] {d.page_content}" for d in reranked_docs])
+        # Step 5: Build context
+        context = "\n\n".join(
+            [f"[Page {d.metadata.get('page_number','N/A')}] {d.page_content}" for d in reranked_docs]
+        )
+
+        # Step 6: LLM Answer
         llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY)
         prompt = f"""
-You are a strict PDF answering agent.
+You are a Retrieval-Augmented Generation (RAG) agent.
 
 User question: "{question_text}"
 
-Relevant text:
+Relevant text from the document:
 {context}
 
 Instructions:
-- Answer using ONLY the text above, VERBATIM.
-- Preserve formatting, bullets, line breaks.
-- If text is from OCR, prefix with: "Extracted from image:"
-- If nothing matches, return only: "⚠️ No relevant section found in the document."
+- Answer using ONLY the text above, VERBATIM where possible.
+- Preserve formatting, bullets, and line breaks.
+- If no relevant text is found, return: "⚠️ No relevant section found in the document."
 """
         result = llm.invoke([HumanMessage(content=prompt)])
-        summary = result.content if result else "⚠️ No relevant content found."
+        answer = result.content if result else "⚠️ No relevant section found in the document."
 
-        return {"answer": summary, "sources": reranked_docs}
+        return {"answer": answer, "sources": reranked_docs}
