@@ -40,19 +40,25 @@ class PDFQAAgent:
         # Build vector store for retrieval
         self.vector_store.build(docs, source_file=pdf_path, progress_callback=progress_callback)
 
-        # Build QA chain (not always used, but available)
+        # Build QA chain with dynamic chain_type
         retriever = self.vector_store.vectordb.as_retriever(
             search_type="similarity_score_threshold",
             search_kwargs={"k": 8, "score_threshold": 0.3},
         )
-        self.qa_chain = build_qa_chain(retriever)
+
+        # Dynamically select chain_type
+        k_value = retriever.search_kwargs.get("k", 0)
+        chain_type = "map_reduce" if k_value > 8 else "stuff"
+
+        self.qa_chain = build_qa_chain(retriever, chain_type=chain_type)
+
         return len(docs)
 
     # -----------------------------
     # Numbered question mapping
     # -----------------------------
     def _map_questions(self, text: str):
-        # Improved regex: matches "1.", "1:", "4: ..." even across newlines
+        # Matches "1.", "1:", "4: ..." even across newlines
         pattern = re.compile(r'(\d+)[\.:]\s*(.+?)(?=(?:\n\d+[\.:])|\Z)', re.DOTALL)
         matches = pattern.findall(text)
         for match in matches:
@@ -61,7 +67,7 @@ class PDFQAAgent:
             self.question_map[q_num] = q_text
 
     # -----------------------------
-    # Section-aware keyword + semantic search (optional)
+    # Section-aware keyword + semantic search
     # -----------------------------
     def find_section(self, query: str, top_k: int = 3) -> List[Document]:
         query_keywords = set(query.lower().split())
@@ -93,7 +99,7 @@ class PDFQAAgent:
                     metadata=doc.metadata
                 ))
 
-        # Semantic similarity (if local embedder exists)
+        # Semantic similarity if local embedder exists
         if self.section_embedder:
             query_vec = self.section_embedder.encode(query, convert_to_tensor=True)
             section_scores = []
@@ -113,8 +119,8 @@ class PDFQAAgent:
     # Core RAG Answer function
     # -----------------------------
     def answer(self, user_input: str, top_k: int = 5, use_section_search: bool = True):
-        if not self.vector_store.vectordb:
-            raise ValueError("Vector store not initialized. Please ingest a PDF.")
+        if not self.vector_store.vectordb or not self.qa_chain:
+            raise ValueError("Vector store or QA chain not initialized. Please ingest a PDF first.")
 
         question_text = user_input.strip()
 
@@ -123,15 +129,12 @@ class PDFQAAgent:
         if numeric_match:
             q_num = int(numeric_match.group(1))
             if q_num in self.question_map:
-                # Replace user query with the actual question text
                 question_text = self.question_map[q_num]
             else:
                 return {"answer": f"⚠️ Question {q_num} not found in PDF.", "sources": []}
 
         # Step 1: Retrieve from vector DB
-        retriever = self.vector_store.vectordb.as_retriever(
-            search_type="mmr", search_kwargs={"k": top_k * 3}
-        )
+        retriever = self.vector_store.vectordb.as_retriever(search_type="mmr", search_kwargs={"k": top_k * 3})
         candidates = retriever.get_relevant_documents(question_text)
 
         if not candidates:
@@ -142,7 +145,7 @@ class PDFQAAgent:
             section_docs = self.find_section(question_text, top_k=top_k)
             candidates.extend(section_docs)
 
-        # Step 3: Deduplicate (page_number + hash of content)
+        # Step 3: Deduplicate
         seen = set()
         unique_candidates = []
         for d in candidates:
@@ -155,33 +158,18 @@ class PDFQAAgent:
         if len(unique_candidates) <= top_k:
             reranked_docs = unique_candidates
         else:
-          reranked_docs = rerank_with_llm(question_text, unique_candidates, top_k=top_k)
-        
+            reranked_docs = rerank_with_llm(question_text, unique_candidates, top_k=top_k)
 
         if not reranked_docs:
             return {"answer": "⚠️ No relevant section found in the document.", "sources": []}
 
         # Step 5: Build context
-        context = "\n\n".join(
-            [f"[Page {d.metadata.get('page_number','N/A')}] {d.page_content}" for d in reranked_docs]
-        )
+        context = "\n\n".join([f"[Page {d.metadata.get('page_number','N/A')}] {d.page_content}" for d in reranked_docs])
 
         # Step 6: LLM Answer
-        llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY)
-        prompt = f"""
-You are a Retrieval-Augmented Generation (RAG) agent.
+        try:
+            answer_text = self.qa_chain.run(f"{question_text}\n\nContext:\n{context}")
+        except Exception as e:
+            answer_text = f"⚠️ Failed to generate answer: {str(e)}"
 
-User question: "{question_text}"
-
-Relevant text from the document:
-{context}
-
-Instructions:
-- Answer using ONLY the text above, VERBATIM where possible.
-- Preserve formatting, bullets, and line breaks.
-- If no relevant text is found, return: "⚠️ No relevant section found in the document."
-"""
-        result = llm.invoke([HumanMessage(content=prompt)])
-        answer = result.content if result else "⚠️ No relevant section found in the document."
-
-        return {"answer": answer, "sources": reranked_docs}
+        return {"answer": answer_text, "sources": reranked_docs}
