@@ -152,7 +152,11 @@ class PDFQAAgent:
                 seen.add(doc_id)
 
         # Step 4: Rerank
-        reranked_docs = rerank_with_llm(question_text, unique_candidates, top_k=top_k)
+        if len(unique_candidates) <= top_k:
+            reranked_docs = unique_candidates
+        else:
+          reranked_docs = rerank_with_llm(question_text, unique_candidates, top_k=top_k)
+        
 
         if not reranked_docs:
             return {"answer": "⚠️ No relevant section found in the document.", "sources": []}
